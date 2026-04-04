@@ -35,6 +35,7 @@ export default function App() {
   const [staffSortDir,setStaffSortDir]=useState<'asc'|'desc'>('desc');
   const [expandedSite,setExpandedSite]=useState<string|null>(null);
   const [includeTest,setIncludeTest]=useState(true);
+  const [selectedRegion,setSelectedRegion]=useState<string>('__all__');
   const [referralSection,setReferralSection]=useState<'target'|'source'|'sender'>('target');
   const [referralSearchQuery,setReferralSearchQuery]=useState('');
   const [referralSortField,setReferralSortField]=useState('totalRefs');
@@ -44,10 +45,16 @@ export default function App() {
   const allLoaded=listings&&sites&&users;
   const anyLoaded=listings||sites||users||referrals;
   const testCount=useMemo(()=>listings?listings.filter(l=>l.testMode==='TRUE').length:0,[listings]);
+  const uniqueRegions=useMemo(()=>{
+    if(!listings) return [];
+    return [...new Set(listings.map(l=>l.healthRegion||'').filter(Boolean))].sort();
+  },[listings]);
   const filteredListings=useMemo(()=>{
     if(!listings) return null;
-    return includeTest?listings:listings.filter(l=>l.testMode!=='TRUE');
-  },[listings,includeTest]);
+    let result=includeTest?listings:listings.filter(l=>l.testMode!=='TRUE');
+    if(selectedRegion!=='__all__') result=result.filter(l=>l.healthRegion===selectedRegion);
+    return result;
+  },[listings,includeTest,selectedRegion]);
 
   const listingStats = useListingStats(filteredListings, geoGroupField);
   const siteStats = useSiteStats(sites);
@@ -68,10 +75,16 @@ export default function App() {
     });
   },[staffing,staffSearchQuery,staffSortField,staffSortDir]);
 
+  const regionListingRefs=useMemo(()=>{
+    if(selectedRegion==='__all__'||!listings) return null;
+    return new Set(listings.filter(l=>l.healthRegion===selectedRegion).map(l=>l.ref).filter(Boolean));
+  },[listings,selectedRegion]);
   const filteredReferrals=useMemo(()=>{
     if(!referrals) return null;
-    return includeTest?referrals:referrals.filter(r=>r.sentToTestListing!=='TRUE');
-  },[referrals,includeTest]);
+    let result=includeTest?referrals:referrals.filter(r=>r.sentToTestListing!=='TRUE');
+    if(regionListingRefs) result=result.filter(r=>regionListingRefs.has(r.referralTargetRef));
+    return result;
+  },[referrals,includeTest,regionListingRefs]);
 
   const referralTestCount=useMemo(()=>referrals?referrals.filter(r=>r.sentToTestListing==='TRUE').length:0,[referrals]);
 
@@ -124,10 +137,24 @@ export default function App() {
               <div style={{width:16,height:16,borderRadius:8,background:includeTest?COLORS.green:'#fff',position:'absolute',top:2,left:includeTest?18:2,transition:'left 0.2s, background 0.2s',boxShadow:'0 1px 3px rgba(0,0,0,0.3)'}}/>
             </div>
           </div>}
+          {listings&&uniqueRegions.length>1&&<Select value={selectedRegion} onValueChange={setSelectedRegion}>
+            <SelectTrigger style={{width:200,background:COLORS.card,border:'1px solid '+COLORS.border,color:COLORS.text,fontSize:12,height:28,borderRadius:6}}><SelectValue placeholder='All Regions'/></SelectTrigger>
+            <SelectContent>
+              <SelectItem value='__all__'>All Regions</SelectItem>
+              {uniqueRegions.map(r=><SelectItem key={r} value={r}>{r}</SelectItem>)}
+            </SelectContent>
+          </Select>}
         </div>
       </div>
     </div>
     <div style={{maxWidth:1400,margin:'0 auto',padding:'24px 32px'}}>
+      {selectedRegion!=='__all__'&&listings&&<div style={{background:COLORS.blue+'15',border:'1px solid '+COLORS.blue+'44',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:13,color:COLORS.blue,fontWeight:600}}>Filtered to: {selectedRegion}</span>
+          <span style={{fontSize:12,color:COLORS.muted}}>— showing {filteredListings?.length.toLocaleString()} of {listings.length.toLocaleString()} listings across all tabs</span>
+        </div>
+        <button onClick={()=>setSelectedRegion('__all__')} style={{fontSize:11,color:COLORS.blue,background:'transparent',border:'1px solid '+COLORS.blue+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Show All Regions</button>
+      </div>}
       {!includeTest&&listings&&<div style={{background:COLORS.amber+'15',border:'1px solid '+COLORS.amber+'44',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
           <span style={{fontSize:16}}>&#9888;</span>
@@ -147,7 +174,7 @@ export default function App() {
         {anyLoaded&&!allLoaded&&<p style={{fontSize:13,color:COLORS.amber,marginTop:12}}>Upload Listings, Sites, and Users for complete cross-file analytics. Referral Analytics is optional.</p>}
       </div>}
       {allLoaded&&<div style={{display:'flex',gap:12,marginBottom:20,alignItems:'center',flexWrap:'wrap'}}>
-        <button onClick={()=>{setListings(null);setSites(null);setUsers(null);setReferrals(null);setListingHeaders([]);setSiteHeaders([]);setUserHeaders([]);setReferralHeaders([]);setTab('overview');}} style={{fontSize:12,color:COLORS.dimmed,background:COLORS.card,border:'1px solid '+COLORS.border,borderRadius:6,padding:'6px 14px',cursor:'pointer'}}>↻ Reload files</button>
+        <button onClick={()=>{setListings(null);setSites(null);setUsers(null);setReferrals(null);setListingHeaders([]);setSiteHeaders([]);setUserHeaders([]);setReferralHeaders([]);setSelectedRegion('__all__');setTab('overview');}} style={{fontSize:12,color:COLORS.dimmed,background:COLORS.card,border:'1px solid '+COLORS.border,borderRadius:6,padding:'6px 14px',cursor:'pointer'}}>↻ Reload files</button>
         {!referrals&&<Upload label='Referral Analytics' desc='Upload to enable referral tab' loaded={false} onLoad={buf=>{const r=parseFile(buf,REFERRAL_MAP);setReferrals(r.rows);setReferralHeaders(r.headerDiag);}}/>}
       </div>}
       {anyLoaded&&<Tabs value={tab} onValueChange={setTab}>
