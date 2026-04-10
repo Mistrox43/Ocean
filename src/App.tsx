@@ -1,11 +1,11 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 import { COLORS, LISTING_MAP, SITE_MAP, USER_MAP, REFERRAL_MAP, USED_FIELDS, FIELD_DEFS } from './constants';
-import { percentage, formatNumber, parseFile, exportToExcel, sortIcon, sortHeaderStyle, deltaColor } from './utils';
+import { percentage, formatNumber, parseFile, exportToExcel, exportToCSVStream, sortIcon, sortHeaderStyle, deltaColor } from './utils';
 import { MiniBar, Bar, Donut, Area, Funnel, Geo, KPI, Upload } from './components/charts';
 import { useListingStats } from './hooks/useListingStats';
 import { useSiteStats } from './hooks/useSiteStats';
@@ -14,13 +14,15 @@ import { useSiteMaturity } from './hooks/useSiteMaturity';
 import { useStaffing } from './hooks/useStaffing';
 import { useDataQuality } from './hooks/useDataQuality';
 import { useReferralAnalytics } from './hooks/useReferralAnalytics';
+import { useFileParser } from './hooks/useFileParser';
 import type { HeaderDiag } from './types';
 
 export default function App() {
   const [listings,setListings]=useState<Record<string,string>[]|null>(null);
   const [sites,setSites]=useState<Record<string,string>[]|null>(null);
   const [users,setUsers]=useState<Record<string,string>[]|null>(null);
-  const [referrals,setReferrals]=useState<Record<string,string>[]|null>(null);
+  const [referralsLoaded,setReferralsLoaded]=useState(false);
+  const [parseErrors,setParseErrors]=useState<Record<string,string>>({});
   const [listingHeaders,setListingHeaders]=useState<HeaderDiag[]>([]);
   const [siteHeaders,setSiteHeaders]=useState<HeaderDiag[]>([]);
   const [userHeaders,setUserHeaders]=useState<HeaderDiag[]>([]);
@@ -41,9 +43,22 @@ export default function App() {
   const [referralSortField,setReferralSortField]=useState('totalRefs');
   const [referralSortDir,setReferralSortDir]=useState<'asc'|'desc'>('desc');
   const [referralExpanded,setReferralExpanded]=useState<string|null>(null);
+  const referralParser = useFileParser();
+
+  useEffect(() => {
+    if (!referralParser.error) return;
+    setParseErrors(p => ({ ...p, referrals: referralParser.error || 'Unable to parse Referral Analytics file.' }));
+  }, [referralParser.error]);
+
+  useEffect(() => {
+    if (!referralParser.metadata) return;
+    setParseErrors(p => ({ ...p, referrals: '' }));
+    setReferralsLoaded(true);
+    setReferralHeaders(referralParser.headerDiag || []);
+  }, [referralParser.metadata, referralParser.headerDiag]);
 
   const allLoaded=listings&&sites&&users;
-  const anyLoaded=listings||sites||users||referrals;
+  const anyLoaded=listings||sites||users||referralsLoaded;
   const testCount=useMemo(()=>listings?listings.filter(l=>l.testMode==='TRUE').length:0,[listings]);
   const uniqueRegions=useMemo(()=>{
     if(!listings) return [];
@@ -79,16 +94,18 @@ export default function App() {
     if(selectedRegion==='__all__'||!listings) return null;
     return new Set(listings.filter(l=>l.healthRegion===selectedRegion).map(l=>l.ref).filter(Boolean));
   },[listings,selectedRegion]);
-  const filteredReferrals=useMemo(()=>{
-    if(!referrals) return null;
-    let result=includeTest?referrals:referrals.filter(r=>r.sentToTestListing!=='TRUE');
-    if(regionListingRefs) result=result.filter(r=>regionListingRefs.has(r.referralTargetRef));
-    return result;
-  },[referrals,includeTest,regionListingRefs]);
-
-  const referralTestCount=useMemo(()=>referrals?referrals.filter(r=>r.sentToTestListing==='TRUE').length:0,[referrals]);
-
-  const referralAnalytics = useReferralAnalytics(filteredReferrals, referrals, sites, listings, users);
+  useEffect(() => {
+    const storageKey = referralParser.metadata?.storageKey;
+    if (!storageKey) return;
+    if (includeTest && !regionListingRefs) return;
+    referralParser.recomputeFromStore(
+      storageKey,
+      includeTest,
+      regionListingRefs ? [...regionListingRefs] : [],
+      { sites, listings, users },
+    );
+  }, [referralParser.metadata?.storageKey, referralParser.recomputeFromStore, includeTest, regionListingRefs, sites, listings, users]);
+  const referralAnalytics = useReferralAnalytics(null, null, sites, listings, users, referralParser.analytics);
 
   const filteredReferralData=useMemo(()=>{
     if(!referralAnalytics) return null;
@@ -130,7 +147,7 @@ export default function App() {
           <p style={{fontSize:13,color:COLORS.dimmed,marginTop:4,marginLeft:48,marginBottom:0}}>Regional Authority — Onboarding & Adoption Analytics</p>
         </div>
         <div style={{display:'flex',gap:8,alignItems:'center'}}>
-          {([['Listings',listings],['Sites',sites],['Users',users],['Referrals',referrals]] as [string,any][]).map(([l,d])=><span key={l} style={{fontSize:12,padding:'4px 10px',borderRadius:6,background:d?COLORS.greenDark:'transparent',color:d?COLORS.green:COLORS.dimmed,border:'1px solid '+(d?COLORS.green+'66':COLORS.border),fontWeight:600}}>{l} {d?d.length:'—'}</span>)}
+          {([['Listings',listings?listings.length:null],['Sites',sites?sites.length:null],['Users',users?users.length:null],['Referrals',referralParser.metadata?.rowCount??(referralsLoaded?0:null)]] as [string,number|null][]).map(([l,d])=><span key={l} style={{fontSize:12,padding:'4px 10px',borderRadius:6,background:d!==null?COLORS.greenDark:'transparent',color:d!==null?COLORS.green:COLORS.dimmed,border:'1px solid '+(d!==null?COLORS.green+'66':COLORS.border),fontWeight:600}}>{l} {d!==null?d:'—'}</span>)}
           {listings&&testCount>0&&<div style={{display:'flex',alignItems:'center',gap:8,marginLeft:8,padding:'4px 12px',borderRadius:6,background:includeTest?'transparent':COLORS.amber+'18',border:'1px solid '+(includeTest?COLORS.border:COLORS.amber+'66')}}>
             <span style={{fontSize:12,color:includeTest?COLORS.dimmed:COLORS.amber,fontWeight:500}}>Test Listings</span>
             <div onClick={()=>setIncludeTest(p=>!p)} style={{width:36,height:20,borderRadius:10,background:includeTest?COLORS.green+'66':COLORS.border,cursor:'pointer',position:'relative',transition:'background 0.2s'}}>
@@ -158,24 +175,27 @@ export default function App() {
       {!includeTest&&listings&&<div style={{background:COLORS.amber+'15',border:'1px solid '+COLORS.amber+'44',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
           <span style={{fontSize:16}}>&#9888;</span>
-          <span style={{fontSize:13,color:COLORS.amber,fontWeight:600}}>Excluding {testCount} test listing{testCount!==1?'s':''}{referrals?' and '+referralTestCount+' test referral'+(referralTestCount!==1?'s':''):''}</span>
-          <span style={{fontSize:12,color:COLORS.muted}}>— showing {(listings.length-testCount).toLocaleString()} of {listings.length.toLocaleString()} listings{referrals?' and '+(referrals.length-referralTestCount).toLocaleString()+' of '+referrals.length.toLocaleString()+' referrals':''} across all tabs</span>
+          <span style={{fontSize:13,color:COLORS.amber,fontWeight:600}}>Excluding {testCount} test listing{testCount!==1?'s':''}{referralsLoaded&&referralParser.metadata?' and referral test rows in analytics':''}</span>
+          <span style={{fontSize:12,color:COLORS.muted}}>— showing {(listings.length-testCount).toLocaleString()} of {listings.length.toLocaleString()} listings{referralsLoaded&&referralParser.metadata&&referralAnalytics?' and '+referralAnalytics.total.toLocaleString()+' referral rows in current filter':''} across all tabs</span>
         </div>
         <button onClick={()=>setIncludeTest(true)} style={{fontSize:11,color:COLORS.amber,background:'transparent',border:'1px solid '+COLORS.amber+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Include All</button>
       </div>}
       {!allLoaded&&<div style={{marginBottom:32}}>
         <h2 style={{fontSize:16,fontWeight:700,marginBottom:16,color:COLORS.muted}}>Load your Regional Authority export files to begin</h2>
         <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:16}}>
-          <Upload label='Export Listings' desc='Upload the Listings export (.xlsx)' loaded={!!listings} onLoad={buf=>{const r=parseFile(buf,LISTING_MAP);setListings(r.rows);setListingHeaders(r.headerDiag);}}/>
-          <Upload label='Export Sites' desc='Upload the Sites export (.xlsx)' loaded={!!sites} onLoad={buf=>{const r=parseFile(buf,SITE_MAP);setSites(r.rows);setSiteHeaders(r.headerDiag);}}/>
-          <Upload label='Export Users' desc='Upload the Users export (.xlsx)' loaded={!!users} onLoad={buf=>{const r=parseFile(buf,USER_MAP);setUsers(r.rows);setUserHeaders(r.headerDiag);}}/>
-          <Upload label='Referral Analytics' desc='Upload the Referral Analytics export (.xlsx)' loaded={!!referrals} onLoad={buf=>{const r=parseFile(buf,REFERRAL_MAP);setReferrals(r.rows);setReferralHeaders(r.headerDiag);}}/>
+          <Upload label='Export Listings' desc='Upload the Listings export (.xlsx)' loaded={!!listings&&listings.length>0} error={parseErrors.listings} onError={message=>setParseErrors(p=>({...p,listings:message}))} onLoad={buf=>{const r=parseFile(buf,LISTING_MAP);if(r.error){setParseErrors(p=>({...p,listings:r.error||'Unable to parse Listings file.'}));return;}setParseErrors(p=>({...p,listings:''}));setListings(r.rows);setListingHeaders(r.headerDiag);}}/>
+          <Upload label='Export Sites' desc='Upload the Sites export (.xlsx)' loaded={!!sites&&sites.length>0} error={parseErrors.sites} onError={message=>setParseErrors(p=>({...p,sites:message}))} onLoad={buf=>{const r=parseFile(buf,SITE_MAP);if(r.error){setParseErrors(p=>({...p,sites:r.error||'Unable to parse Sites file.'}));return;}setParseErrors(p=>({...p,sites:''}));setSites(r.rows);setSiteHeaders(r.headerDiag);}}/>
+          <Upload label='Export Users' desc='Upload the Users export (.xlsx)' loaded={!!users&&users.length>0} error={parseErrors.users} onError={message=>setParseErrors(p=>({...p,users:message}))} onLoad={buf=>{const r=parseFile(buf,USER_MAP);if(r.error){setParseErrors(p=>({...p,users:r.error||'Unable to parse Users file.'}));return;}setParseErrors(p=>({...p,users:''}));setUsers(r.rows);setUserHeaders(r.headerDiag);}}/>
+          <Upload label='Referral Analytics' desc='Upload the Referral Analytics export (.xlsx or .csv)' loaded={referralsLoaded} error={parseErrors.referrals} onError={message=>setParseErrors(p=>({...p,referrals:message}))} isLoading={referralParser.isLoading} progress={referralParser.progress} onFile={file=>{setParseErrors(p=>({...p,referrals:''}));referralParser.ingest(file,REFERRAL_MAP,USED_FIELDS,'referrals',{sites,listings,users});}}/>
         </div>
+        {Object.values(parseErrors).some(Boolean)&&<div style={{marginTop:12,display:'grid',gap:6}}>
+          {Object.entries(parseErrors).filter(([,v])=>!!v).map(([k,v])=><div key={k} style={{background:COLORS.red+'14',border:'1px solid '+COLORS.red+'55',borderRadius:8,padding:'8px 12px',fontSize:12,color:COLORS.red,fontWeight:600,textTransform:'capitalize'}}>{k}: {v}</div>)}
+        </div>}
         {anyLoaded&&!allLoaded&&<p style={{fontSize:13,color:COLORS.amber,marginTop:12}}>Upload Listings, Sites, and Users for complete cross-file analytics. Referral Analytics is optional.</p>}
       </div>}
       {allLoaded&&<div style={{display:'flex',gap:12,marginBottom:20,alignItems:'center',flexWrap:'wrap'}}>
-        <button onClick={()=>{setListings(null);setSites(null);setUsers(null);setReferrals(null);setListingHeaders([]);setSiteHeaders([]);setUserHeaders([]);setReferralHeaders([]);setSelectedRegion('__all__');setTab('overview');}} style={{fontSize:12,color:COLORS.dimmed,background:COLORS.card,border:'1px solid '+COLORS.border,borderRadius:6,padding:'6px 14px',cursor:'pointer'}}>↻ Reload files</button>
-        {!referrals&&<Upload label='Referral Analytics' desc='Upload to enable referral tab' loaded={false} onLoad={buf=>{const r=parseFile(buf,REFERRAL_MAP);setReferrals(r.rows);setReferralHeaders(r.headerDiag);}}/>}
+        <button onClick={()=>{setListings(null);setSites(null);setUsers(null);setReferralsLoaded(false);referralParser.reset();setParseErrors({});setListingHeaders([]);setSiteHeaders([]);setUserHeaders([]);setReferralHeaders([]);setSelectedRegion('__all__');setTab('overview');}} style={{fontSize:12,color:COLORS.dimmed,background:COLORS.card,border:'1px solid '+COLORS.border,borderRadius:6,padding:'6px 14px',cursor:'pointer'}}>↻ Reload files</button>
+        {!referralsLoaded&&<Upload label='Referral Analytics' desc='Upload to enable referral tab (.xlsx or .csv)' loaded={false} error={parseErrors.referrals} onError={message=>setParseErrors(p=>({...p,referrals:message}))} isLoading={referralParser.isLoading} progress={referralParser.progress} onFile={file=>{setParseErrors(p=>({...p,referrals:''}));referralParser.ingest(file,REFERRAL_MAP,USED_FIELDS,'referrals',{sites,listings,users});}}/>}
       </div>}
       {anyLoaded&&<Tabs value={tab} onValueChange={setTab}>
         <TabsList style={{background:COLORS.card,borderRadius:8,marginBottom:24,border:'1px solid '+COLORS.border}}>
@@ -474,6 +494,7 @@ export default function App() {
                 <div style={{display:'flex',gap:10,alignItems:'center'}}>
                   <input type='text' placeholder='Search...' value={referralSearchQuery} onChange={e=>setReferralSearchQuery(e.target.value)} style={{background:COLORS.background,border:'1px solid '+COLORS.border,borderRadius:6,padding:'7px 12px',color:COLORS.text,fontSize:13,width:200,outline:'none'}}/>
                   <span style={{fontSize:12,color:COLORS.dimmed,background:COLORS.border,padding:'2px 8px',borderRadius:10}}>{filteredReferralData.length} results</span>
+                  {referralParser.metadata?.storageKey&&<button onClick={()=>{void exportToCSVStream(referralParser.metadata!.storageKey,'referral-data-'+new Date().toISOString().slice(0,10)+'.csv').catch((err: any)=>{if(err?.name==='AbortError') return; setParseErrors(p=>({...p,referrals:err?.message||'Failed to export referral data.'}));});}} style={{background:'linear-gradient(135deg,'+COLORS.accent+'22,'+COLORS.accent+'11)',border:'1px solid '+COLORS.accent+'44',borderRadius:6,padding:'7px 16px',color:COLORS.accent,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>Export Referral Data</button>}
                 </div>
               </div>
               {referralSection==='target'&&<div style={{maxHeight:600,overflowY:'auto',borderRadius:8,border:'1px solid '+COLORS.border+'22'}}>
@@ -594,7 +615,7 @@ export default function App() {
               </div>}
               {filteredReferralData.length===0&&<div style={{textAlign:'center',padding:'32px 0',color:COLORS.dimmed}}>No results match your search.</div>}
             </div>
-          </>:<div style={{textAlign:'center',padding:'40px 0',color:COLORS.dimmed}}>{referrals?'Load Listings, Sites, and Users files alongside Referral Analytics for full cross-referencing.':'Load the Referral Analytics export file to view referral activity.'}</div>}
+          </>:<div style={{textAlign:'center',padding:'40px 0',color:COLORS.dimmed}}>{referralsLoaded?'Load Listings, Sites, and Users files alongside Referral Analytics for full cross-referencing.':'Load the Referral Analytics export file to view referral activity.'}</div>}
         </TabsContent>
         <TabsContent value='dataquality'>
           {dataQuality&&<>
