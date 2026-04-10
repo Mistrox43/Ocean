@@ -9,13 +9,12 @@ export type IngestMetadata = { parser: 'csv-stream' | 'xlsx-worker'; rowCount: n
 
 type WorkerMessage =
   | { type: 'progress'; processed: number; total: number; pct: number; stage: string }
-  | { type: 'complete'; rows: Record<string, string>[]; headerDiag: HeaderDiag[]; metadata: IngestMetadata; analytics: ReferralAnalytics | null }
-  | { type: 'filtered'; rows: Record<string, string>[]; analytics: ReferralAnalytics | null }
+  | { type: 'complete'; headerDiag: HeaderDiag[]; metadata: IngestMetadata; analytics: ReferralAnalytics | null }
+  | { type: 'filtered'; analytics: ReferralAnalytics | null }
   | { type: 'error'; error: string };
 
 export function useFileParser() {
   const workerRef = useRef<Worker | null>(null);
-  const [rows, setRows] = useState<Record<string, string>[] | null>(null);
   const [headerDiag, setHeaderDiag] = useState<HeaderDiag[] | null>(null);
   const [progress, setProgress] = useState<ParseProgress | null>(null);
   const [metadata, setMetadata] = useState<IngestMetadata | null>(null);
@@ -30,7 +29,6 @@ export function useFileParser() {
 
   const reset = useCallback(() => {
     destroyWorker();
-    setRows(null);
     setHeaderDiag(null);
     setProgress(null);
     setMetadata(null);
@@ -62,7 +60,6 @@ export function useFileParser() {
       destroyWorker();
       const worker = new FileParserWorker();
       workerRef.current = worker;
-      setRows(null);
       setHeaderDiag(null);
       setMetadata(null);
       setAnalytics(null);
@@ -83,12 +80,10 @@ export function useFileParser() {
           return;
         }
         if (msg.type === 'filtered') {
-          setRows(msg.rows);
           setAnalytics(msg.analytics);
           setIsLoading(false);
           return;
         }
-        setRows(msg.rows);
         setHeaderDiag(msg.headerDiag);
         setMetadata(msg.metadata);
         setAnalytics(msg.analytics);
@@ -118,5 +113,5 @@ export function useFileParser() {
 
   useEffect(() => () => destroyWorker(), [destroyWorker]);
 
-  return { ingest, recomputeFromStore, progress, rows, metadata, headerDiag, analytics, error, isLoading, reset };
+  return { ingest, recomputeFromStore, progress, metadata, headerDiag, analytics, error, isLoading, reset };
 }

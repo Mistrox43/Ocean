@@ -133,7 +133,6 @@ const processCsvStreaming = async (file: File, map: Record<string, string>, stor
   const analytics = computeReferralAnalytics(rows, rows, sites, listings, users);
   self.postMessage({
     type: 'complete',
-    rows,
     headerDiag,
     analytics,
     metadata: { parser: 'csv-stream', rowCount: rows.length, fileName: file.name, fileSize: file.size, storageEngine: store.getEngine(), storageKey },
@@ -153,7 +152,7 @@ const filterFromStore = async (storageKey: string, includeTest: boolean, regionR
     }
   }
   const analytics: ReferralAnalytics | null = computeReferralAnalytics(filtered, filtered, sites, listings, users);
-  self.postMessage({ type: 'filtered', rows: filtered, analytics });
+  self.postMessage({ type: 'filtered', analytics });
 };
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
@@ -189,7 +188,6 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       postProgress(100, 100, 'Completed');
       self.postMessage({
         type: 'complete',
-        rows,
         headerDiag,
         analytics: computeReferralAnalytics(rows, rows, msg.sites, msg.listings, msg.users),
         metadata: { parser: 'xlsx-worker', rowCount: rows.length, fileName: msg.fileName, fileSize: msg.fileSize, storageEngine: store.getEngine(), storageKey: msg.storageKey },
