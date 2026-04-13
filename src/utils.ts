@@ -139,8 +139,7 @@ export async function exportToCSVStream(storageKey: string, filename: string): P
     if (err?.name === 'AbortError') return;
     throw err;
   }
-        await ws.write(headers.join(',') + '\n');
-      }
+            }
       const lines = batch.map(row => headers!.map(h => esc(String(row[h] ?? ''))).join(',')).join('\n') + '\n';
       await ws.write(lines);
     }
