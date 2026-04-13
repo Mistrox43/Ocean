@@ -139,6 +139,31 @@ export async function exportToCSVStream(storageKey: string, filename: string): P
     if (err?.name === 'AbortError') return;
     throw err;
   }
+        await ws.write(headers.join(',') + '\n');
+      }
+      const lines = batch.map(row => headers!.map(h => esc(String(row[h] ?? ''))).join(',')).join('\n') + '\n';
+      await ws.write(lines);
+    }
+    await ws.close();
+    return;
+  }
+
+  const chunks: string[] = [];
+  for await (const batch of store.streamRead(10000)) {
+    if (!batch.length) continue;
+    if (!headers) {
+      headers = Object.keys(batch[0]);
+      chunks.push(headers.join(',') + '\n');
+    }
+    chunks.push(batch.map(row => headers!.map(h => esc(String(row[h] ?? ''))).join(',')).join('\n') + '\n');
+  }
+  const blob = new Blob(chunks, { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 /**
