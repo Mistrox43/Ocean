@@ -38,7 +38,7 @@ export function normalizeSiteNumber(s: string): string {
  */
 export function formatDate(v: string): string {
   if (!v) return '';
-  if (/^\d{4}-\d{2}/.test(v)) return v;
+  if (/^\d{4}-\d{2}/.test(v)) return v.slice(0, 10);
   const n = parseFloat(v);
   if (!isNaN(n) && n > 1 && n < 200000) {
     const d = new Date(Math.round((n - 25569) * 86400 * 1000));
@@ -96,44 +96,49 @@ export function exportToExcel(data: Record<string, string | number | boolean>[],
  * to a Blob-based download.
  */
 export async function exportToCSVStream(storageKey: string, filename: string): Promise<void> {
-  const store = await createRowStore();
-  await store.open(storageKey);
-  let headers: string[] | null = null;
-  const esc = (v: string) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+  try {
+    const store = await createRowStore();
+    await store.open(storageKey);
+    let headers: string[] | null = null;
+    const esc = (v: string) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
 
-  const picker = (window as any).showSaveFilePicker;
-  if (picker) {
-    const fh = await picker({ suggestedName: filename, types: [{ description: 'CSV Files', accept: { 'text/csv': ['.csv'] } }] });
-    const ws = await fh.createWritable();
+    const picker = (window as any).showSaveFilePicker;
+    if (picker) {
+      const fh = await picker({ suggestedName: filename, types: [{ description: 'CSV Files', accept: { 'text/csv': ['.csv'] } }] });
+      const ws = await fh.createWritable();
+      for await (const batch of store.streamRead(10000)) {
+        if (!batch.length) continue;
+        if (!headers) {
+          headers = Object.keys(batch[0]);
+          await ws.write(headers.join(',') + '\n');
+        }
+        const lines = batch.map(row => headers!.map(h => esc(String(row[h] ?? ''))).join(',')).join('\n') + '\n';
+        await ws.write(lines);
+      }
+      await ws.close();
+      return;
+    }
+
+    const chunks: string[] = [];
     for await (const batch of store.streamRead(10000)) {
       if (!batch.length) continue;
       if (!headers) {
         headers = Object.keys(batch[0]);
-        await ws.write(headers.join(',') + '\n');
+        chunks.push(headers.join(',') + '\n');
       }
-      const lines = batch.map(row => headers!.map(h => esc(String(row[h] ?? ''))).join(',')).join('\n') + '\n';
-      await ws.write(lines);
+      chunks.push(batch.map(row => headers!.map(h => esc(String(row[h] ?? ''))).join(',')).join('\n') + '\n');
     }
-    await ws.close();
-    return;
+    const blob = new Blob(chunks, { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (err: any) {
+    if (err?.name === 'AbortError') return;
+    throw err;
   }
-
-  const chunks: string[] = [];
-  for await (const batch of store.streamRead(10000)) {
-    if (!batch.length) continue;
-    if (!headers) {
-      headers = Object.keys(batch[0]);
-      chunks.push(headers.join(',') + '\n');
-    }
-    chunks.push(batch.map(row => headers!.map(h => esc(String(row[h] ?? ''))).join(',')).join('\n') + '\n');
-  }
-  const blob = new Blob(chunks, { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 /**

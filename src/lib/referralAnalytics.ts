@@ -35,8 +35,9 @@ export function computeReferralAnalytics(
 
   const wk: Record<string, { total: number; test: number; nonTest: number; senders: Set<string>; receivers: Set<string> }> = {};
   (referrals || []).forEach(r => {
-    const fd = formatDate(r.referralCreationDate); if (!fd || fd.length < 10) return;
-    const d = new Date(fd.substring(0, 10) + 'T00:00:00Z'); const day = d.getUTCDay(); const diff = d.getUTCDate() - day + (day === 0 ? -6 : 1);
+    const fd = formatDate(r.referralCreationDate); if (!fd || !/^\d{4}-\d{2}-\d{2}$/.test(fd)) return;
+    const d = new Date(fd.substring(0, 10) + 'T00:00:00Z'); if (isNaN(d.getTime())) return;
+    const day = d.getUTCDay(); const diff = d.getUTCDate() - day + (day === 0 ? -6 : 1);
     d.setUTCDate(diff); const wkKey = d.toISOString().slice(0, 10);
     if (!wk[wkKey]) wk[wkKey] = { total: 0, test: 0, nonTest: 0, senders: new Set(), receivers: new Set() };
     wk[wkKey].total++;
@@ -137,4 +138,3 @@ export function computeReferralAnalytics(
     byRegion, byService, byClinType, byEmrSent, byEmrRecv,
   };
 }
-
