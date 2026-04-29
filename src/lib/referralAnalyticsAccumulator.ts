@@ -32,6 +32,7 @@ export class ReferralAnalyticsAccumulator {
 
   private initialTargetRefs = new Map<string, string>();
   private regionMap: Record<string, number> = {};
+  private raNameMap: Record<string, number> = {};
   private serviceMap: Record<string, number> = {};
   private clinTypeMap: Record<string, number> = {};
   private emrSent: Record<string, number> = {};
@@ -107,6 +108,7 @@ export class ReferralAnalyticsAccumulator {
     let region = 'Referrals not mapped to listings';
     if (tRef && (tRef in this.regionLookup)) region = this.regionLookup[tRef] || 'Region not defined';
     this.regionMap[region] = (this.regionMap[region] || 0) + 1;
+    const rn = row.raName || 'Unknown'; this.raNameMap[rn] = (this.raNameMap[rn] || 0) + 1;
     const svc = row.currentHealthService || row.initialHealthService || 'Unknown'; this.serviceMap[svc] = (this.serviceMap[svc] || 0) + 1;
     const ct = row.referrerClinicianType || 'Unknown'; this.clinTypeMap[ct] = (this.clinTypeMap[ct] || 0) + 1;
     const srcEmr = this.siteEmrLookup[srcSite] || 'Unknown EMR'; const tgtEmr = this.siteEmrLookup[tgtSite] || 'Unknown EMR';
@@ -133,6 +135,7 @@ export class ReferralAnalyticsAccumulator {
     const bySender = this.unknownSenderCount > 0 ? [{ userName: '', fullName: '(Unknown sender)', clinicianType: '', profId: '', totalRefs: this.unknownSenderCount, uniqueTargets: this.unknownTargets.size, uniqueListings: this.unknownListings.size, isUnknown: true, srcSites: mapSrc(this.unknownSrcSites) }, ...bySenderRows] : bySenderRows;
 
     const byRegionSorted = Object.entries(this.regionMap).sort((a, b) => b[1] - a[1]);
+    const byRaNameSorted = Object.entries(this.raNameMap).sort((a, b) => b[1] - a[1]);
     const bySvcSorted = Object.entries(this.serviceMap).sort((a, b) => b[1] - a[1]);
     const byCtSorted = Object.entries(this.clinTypeMap).sort((a, b) => b[1] - a[1]);
     const topN = (entries: [string, number][]) => {
@@ -154,7 +157,7 @@ export class ReferralAnalyticsAccumulator {
       curMCount, curM, lastFullM, lastFullCount, chg1, cmp1M, cmp1Count, chg3, cmp3M, cmp3Count, chg12, cmp12M, cmp12Count, earliestDate: this.earliestDate,
       fhirCount, fhirPct: percentage(fhirCount, this.totalRows),
       timeline, weekly, byTarget, bySource, bySender,
-      byRegion: topN(byRegionSorted), byService: topN(bySvcSorted), byClinType: topN(byCtSorted), byEmrSent, byEmrRecv,
+      byRegion: topN(byRegionSorted), byRaName: topN(byRaNameSorted), byService: topN(bySvcSorted), byClinType: topN(byCtSorted), byEmrSent, byEmrRecv,
     };
   }
 }

@@ -34,6 +34,7 @@ export const LISTING_MAP: Record<string, string> = {
   clinicianProfessionalId: 'clinicianProfessionalId',
   'clinician Professional ID': 'clinicianProfessionalId',
   'clinician professional id': 'clinicianProfessionalId',
+  raname: 'raName', raName: 'raName', 'ra name': 'raName', 'RA Name': 'raName',
 };
 
 export const SITE_MAP: Record<string, string> = {
@@ -57,6 +58,7 @@ export const SITE_MAP: Record<string, string> = {
   'Site Validation Status Changed By': 'validationChangedBy',
   'site validation status changed on': 'validationChangedOn',
   'Site Validation Status Changed On': 'validationChangedOn',
+  raname: 'raName', raName: 'raName', 'ra name': 'raName', 'RA Name': 'raName',
 };
 
 export const USER_MAP: Record<string, string> = {
@@ -72,6 +74,7 @@ export const USER_MAP: Record<string, string> = {
   licenseversion: 'licenseVersion', LicenseVersion: 'licenseVersion',
   'hinp agreement signatory': 'hinpSignatory', 'HINP Agreement Signatory': 'hinpSignatory',
   valid: 'valid', Valid: 'valid',
+  raname: 'raName', raName: 'raName', 'ra name': 'raName', 'RA Name': 'raName',
 };
 
 export const REFERRAL_MAP: Record<string, string> = {
@@ -107,6 +110,7 @@ export const REFERRAL_MAP: Record<string, string> = {
   currenthealthservice: 'currentHealthService', currentHealthService: 'currentHealthService',
   initialhealthservice: 'initialHealthService', initialHealthService: 'initialHealthService',
   externalserviceid: 'externalServiceId', externalServiceId: 'externalServiceId',
+  raname: 'raName', raName: 'raName', 'ra name': 'raName', 'RA Name': 'raName',
 };
 
 // ── Diagnostic field sets ───────────────────────────────────────────────────
@@ -120,18 +124,18 @@ export const USED_FIELDS: Record<string, Set<string>> = {
     'testMode', 'siteNum', 'siteName', 'listingType', 'eReferralManagement',
     'catchmentArea', 'raCliniciansCount', 'organizationTitle',
     'integratedSystem', 'services', 'language', 'claimedByUser',
-    'clinicianProfessionalId',
+    'clinicianProfessionalId', 'raName',
   ]),
   site: new Set([
     'siteNumber', 'siteName', 'approvedListings', 'patientMessagingEnabled',
     'patientMessagingLicences', 'onlineBookingEnabled', 'onlineBookingLicences',
     'estimatedFees', 'emr', 'organizationAddress', 'validatedSite',
-    'validationChangedBy', 'validationChangedOn',
+    'validationChangedBy', 'validationChangedOn', 'raName',
   ]),
   user: new Set([
     'userName', 'name', 'clinicianType', 'phone', 'professionalId', 'email',
     'siteNames', 'siteNumbers', 'dateOfAgreement', 'licenseVersion',
-    'hinpSignatory', 'valid',
+    'hinpSignatory', 'valid', 'raName',
   ]),
   referral: new Set([
     'siteNum', 'srcsiteNum', 'srcSiteName', 'referralTargetRef',
@@ -143,7 +147,7 @@ export const USED_FIELDS: Record<string, Set<string>> = {
     'referrerUrgency', 'recipientPriority', 'patientCity', 'patientProvince',
     'referrerCity', 'referrerProvince', 'recipientProvince',
     'referrerProfessionalId', 'currentHealthService', 'initialHealthService',
-    'externalServiceId',
+    'externalServiceId', 'raName',
   ]),
 };
 

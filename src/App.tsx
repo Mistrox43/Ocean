@@ -39,6 +39,7 @@ export default function App() {
   const [expandedSite,setExpandedSite]=useState<string|null>(null);
   const [includeTest,setIncludeTest]=useState(true);
   const [selectedRegion,setSelectedRegion]=useState<string>('__all__');
+  const [selectedRaNames,setSelectedRaNames]=useState<string[]>([]);
   const [referralSection,setReferralSection]=useState<'target'|'source'|'sender'>('target');
   const [referralSearchQuery,setReferralSearchQuery]=useState('');
   const [referralSortField,setReferralSortField]=useState('totalRefs');
@@ -81,19 +82,37 @@ export default function App() {
     if(!listings) return [];
     return [...new Set(listings.map(l=>l.healthRegion||'').filter(Boolean))].sort();
   },[listings]);
+  const uniqueRaNames=useMemo(()=>{
+    const names=new Set<string>();
+    if(listings) listings.forEach(l=>{if(l.raName) names.add(l.raName);});
+    if(sites) sites.forEach(s=>{if(s.raName) names.add(s.raName);});
+    if(users) users.forEach(u=>{if(u.raName) names.add(u.raName);});
+    return [...names].sort();
+  },[listings,sites,users]);
   const filteredListings=useMemo(()=>{
     if(!listings) return null;
     let result=includeTest?listings:listings.filter(l=>l.testMode!=='TRUE');
     if(selectedRegion!=='__all__') result=result.filter(l=>l.healthRegion===selectedRegion);
+    if(selectedRaNames.length) result=result.filter(l=>selectedRaNames.includes(l.raName));
     return result;
-  },[listings,includeTest,selectedRegion]);
+  },[listings,includeTest,selectedRegion,selectedRaNames]);
+  const filteredSites=useMemo(()=>{
+    if(!sites) return null;
+    if(!selectedRaNames.length) return sites;
+    return sites.filter(s=>selectedRaNames.includes(s.raName));
+  },[sites,selectedRaNames]);
+  const filteredUsers=useMemo(()=>{
+    if(!users) return null;
+    if(!selectedRaNames.length) return users;
+    return users.filter(u=>selectedRaNames.includes(u.raName));
+  },[users,selectedRaNames]);
 
   const listingStats = useListingStats(filteredListings, geoGroupField);
-  const siteStats = useSiteStats(sites);
-  const userStats = useUserStats(users);
-  const siteMaturity = useSiteMaturity(filteredListings, sites, userStats);
-  const staffing = useStaffing(filteredListings, sites, userStats);
-  const dataQuality = useDataQuality(filteredListings, sites, users);
+  const siteStats = useSiteStats(filteredSites);
+  const userStats = useUserStats(filteredUsers);
+  const siteMaturity = useSiteMaturity(filteredListings, filteredSites, userStats);
+  const staffing = useStaffing(filteredListings, filteredSites, userStats);
+  const dataQuality = useDataQuality(filteredListings, filteredSites, filteredUsers);
 
   const filteredStaff=useMemo(()=>{
     if(!staffing) return null;
@@ -109,20 +128,22 @@ export default function App() {
 
   const regionListingRefs=useMemo(()=>{
     if(selectedRegion==='__all__'||!listings) return null;
-    return new Set(listings.filter(l=>l.healthRegion===selectedRegion).map(l=>l.ref).filter(Boolean));
-  },[listings,selectedRegion]);
+    let base=selectedRaNames.length?listings.filter(l=>selectedRaNames.includes(l.raName)):listings;
+    return new Set(base.filter(l=>l.healthRegion===selectedRegion).map(l=>l.ref).filter(Boolean));
+  },[listings,selectedRegion,selectedRaNames]);
   useEffect(() => {
     const storageKey = referralParser.metadata?.storageKey;
     if (!storageKey) return;
-    if (includeTest && !regionListingRefs && !referralInitialTargetFilter.length) return;
+    if (includeTest && !regionListingRefs && !referralInitialTargetFilter.length && !selectedRaNames.length) return;
     referralParser.recomputeFromStore(
       storageKey,
       includeTest,
       regionListingRefs ? [...regionListingRefs] : [],
       referralInitialTargetFilter.length ? referralInitialTargetFilter : undefined,
+      selectedRaNames.length ? selectedRaNames : undefined,
       { sites, listings, users },
     );
-  }, [referralParser.metadata?.storageKey, referralParser.recomputeFromStore, includeTest, regionListingRefs, referralInitialTargetFilter, sites, listings, users]);
+  }, [referralParser.metadata?.storageKey, referralParser.recomputeFromStore, includeTest, regionListingRefs, referralInitialTargetFilter, selectedRaNames, sites, listings, users]);
   const referralAnalytics = useReferralAnalytics(null, null, sites, listings, users, referralParser.analytics);
   const referralIngestDiag = referralParser.metadata?.diagnostics;
   const referralIngestAcceptance = referralIngestDiag ? percentage(referralIngestDiag.acceptedRows, Math.max(referralIngestDiag.sourceRows, 1)) : 0;
@@ -186,6 +207,7 @@ export default function App() {
               {uniqueRegions.map(r=><SelectItem key={r} value={r}>{r}</SelectItem>)}
             </SelectContent>
           </Select>}
+          {uniqueRaNames.length>0&&<MultiSelectCombobox options={uniqueRaNames.map(n=>({ref:n,title:n}))} value={selectedRaNames} onChange={setSelectedRaNames} placeholder='All RA Names' width={180}/>}
         </div>
       </div>
     </div>
@@ -196,6 +218,13 @@ export default function App() {
           <span style={{fontSize:12,color:COLORS.muted}}>— showing {filteredListings?.length.toLocaleString()} of {listings.length.toLocaleString()} listings across all tabs</span>
         </div>
         <button onClick={()=>setSelectedRegion('__all__')} style={{fontSize:11,color:COLORS.blue,background:'transparent',border:'1px solid '+COLORS.blue+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Show All Regions</button>
+      </div>}
+      {selectedRaNames.length>0&&<div style={{background:COLORS.purple+'15',border:'1px solid '+COLORS.purple+'44',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8}}>
+          <span style={{fontSize:13,color:COLORS.purple,fontWeight:600}}>RA Name filter: {selectedRaNames.join(', ')}</span>
+          <span style={{fontSize:12,color:COLORS.muted}}>— data scoped to selected RA{selectedRaNames.length!==1?'s':''} across all tabs</span>
+        </div>
+        <button onClick={()=>setSelectedRaNames([])} style={{fontSize:11,color:COLORS.purple,background:'transparent',border:'1px solid '+COLORS.purple+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Show All</button>
       </div>}
       {!includeTest&&listings&&<div style={{background:COLORS.amber+'15',border:'1px solid '+COLORS.amber+'44',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
@@ -495,17 +524,21 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16,marginBottom:20}}>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:16,marginBottom:20}}>
+              <div style={{background:COLORS.card,borderRadius:12,border:'1px solid '+COLORS.border,padding:24}}>
+                <h3 style={{fontSize:14,fontWeight:700,marginBottom:12,marginTop:0}}>Referrals by RA Name</h3>
+                <Donut size={140} segments={referralAnalytics.byRaName.map((d,i)=>({label:d.label,value:d.value,color:[COLORS.purple,COLORS.accent,COLORS.green,COLORS.amber,COLORS.blue,COLORS.red,'#f472b6','#a3e635','#fb923c','#6ee7b7','#94A3B8'][i%11]}))}/>
+              </div>
               <div style={{background:COLORS.card,borderRadius:12,border:'1px solid '+COLORS.border,padding:24}}>
                 <h3 style={{fontSize:14,fontWeight:700,marginBottom:12,marginTop:0}}>Referrals Sent — EMR Breakdown</h3>
-                <Bar data={referralAnalytics.byEmrSent.slice(0,10)} color={COLORS.blue} height={180}/>
+                <Donut size={140} segments={referralAnalytics.byEmrSent.slice(0,10).map((d,i)=>({label:d.label,value:d.value,color:[COLORS.blue,COLORS.accent,COLORS.green,COLORS.purple,COLORS.amber,COLORS.red,'#f472b6','#a3e635','#fb923c','#6ee7b7','#94A3B8'][i%11]}))}/>
               </div>
               <div style={{background:COLORS.card,borderRadius:12,border:'1px solid '+COLORS.border,padding:24}}>
                 <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
                   <h3 style={{fontSize:14,fontWeight:700,margin:0}}>Referrals Received — EMR Breakdown</h3>
-                  {referralAnalytics.fhirCount>0&&<span style={{fontSize:11,padding:'3px 8px',borderRadius:4,background:COLORS.accent+'22',color:COLORS.accent,fontWeight:600}}>FHIR/API: {referralAnalytics.fhirPct}% ({formatNumber(referralAnalytics.fhirCount)})</span>}
+                  {referralAnalytics.fhirCount>0&&<span style={{fontSize:11,padding:'3px 8px',borderRadius:4,background:COLORS.accent+'22',color:COLORS.accent,fontWeight:600}}>FHIR/API: {referralAnalytics.fhirPct}%</span>}
                 </div>
-                <Bar data={referralAnalytics.byEmrRecv.slice(0,10)} color={COLORS.purple} height={180}/>
+                <Donut size={140} segments={referralAnalytics.byEmrRecv.slice(0,10).map((d,i)=>({label:d.label,value:d.value,color:[COLORS.purple,COLORS.blue,COLORS.green,COLORS.accent,COLORS.amber,COLORS.red,'#f472b6','#a3e635','#fb923c','#6ee7b7','#94A3B8'][i%11]}))}/>
               </div>
             </div>
 

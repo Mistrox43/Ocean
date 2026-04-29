@@ -266,6 +266,7 @@ export interface ReferralAnalytics {
   bySource: SourceSiteRow[];
   bySender: SenderRow[];
   byRegion: LabelValue[];
+  byRaName: LabelValue[];
   byService: LabelValue[];
   byClinType: LabelValue[];
   byEmrSent: LabelValue[];
