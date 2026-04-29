@@ -99,6 +99,10 @@ export function computeReferralAnalytics(
   const topRegions = byRegionSorted.slice(0, 10); const otherRegions = byRegionSorted.slice(10).reduce((s, e) => s + e[1], 0);
   const byRegion = [...topRegions.map(([l, v]) => ({ label: l, value: v })), ...(otherRegions > 0 ? [{ label: 'All others', value: otherRegions }] : [])];
 
+  const raNameMap: Record<string, number> = {}; filteredReferralRows.forEach(r => { const rn = r.raName || 'Unknown'; raNameMap[rn] = (raNameMap[rn] || 0) + 1; });
+  const byRaNameSorted = Object.entries(raNameMap).sort((a, b) => b[1] - a[1]);
+  const topRaName = byRaNameSorted.slice(0, 10); const otherRaName = byRaNameSorted.slice(10).reduce((s, e) => s + e[1], 0);
+  const byRaName = [...topRaName.map(([l, v]) => ({ label: l, value: v })), ...(otherRaName > 0 ? [{ label: 'All others', value: otherRaName }] : [])];
   const svcMap: Record<string, number> = {}; filteredReferralRows.forEach(r => { const s = r.currentHealthService || r.initialHealthService || 'Unknown'; svcMap[s] = (svcMap[s] || 0) + 1; });
   const bySvcSorted = Object.entries(svcMap).sort((a, b) => b[1] - a[1]);
   const topSvc = bySvcSorted.slice(0, 10); const otherSvc = bySvcSorted.slice(10).reduce((s, e) => s + e[1], 0);
@@ -138,6 +142,6 @@ export function computeReferralAnalytics(
     chg1, cmp1M, cmp1Count, chg3, cmp3M, cmp3Count, chg12, cmp12M, cmp12Count, earliestDate,
     fhirCount, fhirPct: percentage(fhirCount, filteredReferralRows.length),
     timeline, weekly, byTarget, bySource, bySender,
-    byRegion, byService, byClinType, byEmrSent, byEmrRecv,
+    byRegion, byRaName, byService, byClinType, byEmrSent, byEmrRecv,
   };
 }
