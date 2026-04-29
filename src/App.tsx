@@ -15,6 +15,7 @@ import { useStaffing } from './hooks/useStaffing';
 import { useDataQuality } from './hooks/useDataQuality';
 import { useReferralAnalytics } from './hooks/useReferralAnalytics';
 import { useFileParser, type IngestRoute } from './hooks/useFileParser';
+import { MultiSelectCombobox } from './components/MultiSelectCombobox';
 import type { HeaderDiag } from './types';
 
 export default function App() {
@@ -43,7 +44,7 @@ export default function App() {
   const [referralSortField,setReferralSortField]=useState('totalRefs');
   const [referralSortDir,setReferralSortDir]=useState<'asc'|'desc'>('desc');
   const [referralExpanded,setReferralExpanded]=useState<string|null>(null);
-  const [referralInitialTargetFilter,setReferralInitialTargetFilter]=useState('');
+  const [referralInitialTargetFilter,setReferralInitialTargetFilter]=useState<string[]>([]);
   const [referralInitialTargetOptions,setReferralInitialTargetOptions]=useState<{ref:string;title:string}[]>([]);
   const lastOptionsStorageKeyRef=useRef('');
   const referralParser = useFileParser();
@@ -70,7 +71,7 @@ export default function App() {
     if (referralParser.metadata.storageKey === lastOptionsStorageKeyRef.current) return;
     lastOptionsStorageKeyRef.current = referralParser.metadata.storageKey;
     setReferralInitialTargetOptions(referralParser.analytics.distinctInitialTargetRefs || []);
-    setReferralInitialTargetFilter('');
+    setReferralInitialTargetFilter([]);
   }, [referralParser.metadata, referralParser.analytics]);
 
   const allLoaded=listings&&sites&&users;
@@ -113,12 +114,12 @@ export default function App() {
   useEffect(() => {
     const storageKey = referralParser.metadata?.storageKey;
     if (!storageKey) return;
-    if (includeTest && !regionListingRefs && !referralInitialTargetFilter) return;
+    if (includeTest && !regionListingRefs && !referralInitialTargetFilter.length) return;
     referralParser.recomputeFromStore(
       storageKey,
       includeTest,
       regionListingRefs ? [...regionListingRefs] : [],
-      referralInitialTargetFilter || undefined,
+      referralInitialTargetFilter.length ? referralInitialTargetFilter : undefined,
       { sites, listings, users },
     );
   }, [referralParser.metadata?.storageKey, referralParser.recomputeFromStore, includeTest, regionListingRefs, referralInitialTargetFilter, sites, listings, users]);
@@ -516,15 +517,7 @@ export default function App() {
                   )}
                 </div>
                 <div style={{display:'flex',gap:10,alignItems:'center'}}>
-                  {referralInitialTargetOptions.length>0&&<Select value={referralInitialTargetFilter||'__all__'} onValueChange={v=>{setReferralInitialTargetFilter(v==='__all__'?'':v);setReferralExpanded(null);}}>
-                    <SelectTrigger style={{width:220,background:COLORS.card,border:'1px solid '+(referralInitialTargetFilter?COLORS.accent:COLORS.border),color:referralInitialTargetFilter?COLORS.accent:COLORS.text,fontSize:12,height:32,borderRadius:6}}>
-                      <SelectValue placeholder='All Initial Targets'/>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value='__all__'>All Initial Targets</SelectItem>
-                      {referralInitialTargetOptions.map(o=><SelectItem key={o.ref} value={o.ref} title={o.title}>{o.ref}{o.title!==o.ref?' — '+o.title.substring(0,30):''}</SelectItem>)}
-                    </SelectContent>
-                  </Select>}
+                  {referralInitialTargetOptions.length>0&&<MultiSelectCombobox options={referralInitialTargetOptions} value={referralInitialTargetFilter} onChange={v=>{setReferralInitialTargetFilter(v);setReferralExpanded(null);}} placeholder='All Initial Targets' width={220}/>}
                   <input type='text' placeholder='Search...' value={referralSearchQuery} onChange={e=>setReferralSearchQuery(e.target.value)} style={{background:COLORS.background,border:'1px solid '+COLORS.border,borderRadius:6,padding:'7px 12px',color:COLORS.text,fontSize:13,width:200,outline:'none'}}/>
                   <span style={{fontSize:12,color:COLORS.dimmed,background:COLORS.border,padding:'2px 8px',borderRadius:10}}>{filteredReferralData.length} results</span>
                   {referralParser.metadata?.storageKey&&<button onClick={()=>{void exportToCSVStream(referralParser.metadata!.storageKey,'referral-data-'+new Date().toISOString().slice(0,10)+'.csv').catch((err: any)=>{if(err?.name==='AbortError') return; setParseErrors(p=>({...p,referrals:err?.message||'Failed to export referral data.'}));});}} style={{background:'linear-gradient(135deg,'+COLORS.accent+'22,'+COLORS.accent+'11)',border:'1px solid '+COLORS.accent+'44',borderRadius:6,padding:'7px 16px',color:COLORS.accent,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>Export Referral Data</button>}
