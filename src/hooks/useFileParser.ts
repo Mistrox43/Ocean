@@ -135,11 +135,11 @@ export function useFileParser() {
     }
   }, [destroyWorker]);
 
-  const recomputeFromStore = useCallback((storageKey: string, includeTest: boolean, regionRefs: string[], ctx?: { sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null }) => {
+  const recomputeFromStore = useCallback((storageKey: string, includeTest: boolean, regionRefs: string[], initialTargetRef?: string, ctx?: { sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null }) => {
     if (!workerRef.current) return;
     setIsLoading(true);
     setProgress(p => p ? { ...p, stage: 'Applying filters from storage...' } : { processed: 0, total: 0, pct: 0, stage: 'Applying filters from storage...' });
-    workerRef.current.postMessage({ type: 'filter-from-store', storageKey, includeTest, regionRefs, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null });
+    workerRef.current.postMessage({ type: 'filter-from-store', storageKey, includeTest, regionRefs, initialTargetRef: initialTargetRef || undefined, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null });
   }, []);
 
   useEffect(() => () => destroyWorker(), [destroyWorker]);

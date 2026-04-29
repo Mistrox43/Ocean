@@ -230,6 +230,11 @@ export interface LabelValue {
   value: number;
 }
 
+export interface InitialTargetRefOption {
+  ref: string;
+  title: string;
+}
+
 export interface ReferralAnalytics {
   total: number;
   distinctRefs: number;
@@ -238,6 +243,7 @@ export interface ReferralAnalytics {
   uniqueSenders: number;
   uniqueProfIds: number;
   uniqueTargetRefs: number;
+  distinctInitialTargetRefs: InitialTargetRefOption[];
   curMCount: number;
   curM: string;
   lastFullM: string;

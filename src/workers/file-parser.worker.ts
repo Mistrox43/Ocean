@@ -8,7 +8,7 @@ import { formatDate } from '@/utils';
 type WorkerRequest =
   | { type: 'parse-small'; buffer: ArrayBuffer; map: Record<string, string>; fileName: string; fileSize: number; storageKey: string; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null; ingestRoute: 'auto' | 'small' | 'large' }
   | { type: 'parse-csv-stream'; file: File; map: Record<string, string>; storageKey: string; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null; ingestRoute: 'auto' | 'small' | 'large' }
-  | { type: 'filter-from-store'; storageKey: string; includeTest: boolean; regionRefs?: string[]; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null };
+  | { type: 'filter-from-store'; storageKey: string; includeTest: boolean; regionRefs?: string[]; initialTargetRef?: string; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null };
 
 type ProgressMessage = {
   type: 'progress';
@@ -203,7 +203,7 @@ const processCsvStreaming = async (file: File, map: Record<string, string>, stor
   });
 };
 
-const filterFromStore = async (storageKey: string, includeTest: boolean, regionRefs: string[] = [], sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null) => {
+const filterFromStore = async (storageKey: string, includeTest: boolean, regionRefs: string[] = [], initialTargetRef: string | undefined, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null) => {
   const store = await getStore();
   await store.open(storageKey);
   const refSet = regionRefs.length ? new Set(regionRefs) : null;
@@ -212,6 +212,7 @@ const filterFromStore = async (storageKey: string, includeTest: boolean, regionR
     for (const row of batch) {
       if (!includeTest && row.sentToTestListing === 'TRUE') continue;
       if (refSet && !refSet.has(row.referralTargetRef)) continue;
+      if (initialTargetRef && row.initialReferralTargetRef !== initialTargetRef) continue;
       acc.add(row);
     }
   }
@@ -284,7 +285,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       await processCsvStreaming(msg.file, msg.map, msg.storageKey, msg.sites, msg.listings, msg.users, msg.ingestRoute);
       return;
     }
-    await filterFromStore(msg.storageKey, msg.includeTest, msg.regionRefs, msg.sites, msg.listings, msg.users);
+    await filterFromStore(msg.storageKey, msg.includeTest, msg.regionRefs, msg.initialTargetRef, msg.sites, msg.listings, msg.users);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to parse file.';
     self.postMessage({ type: 'error', error: message });
