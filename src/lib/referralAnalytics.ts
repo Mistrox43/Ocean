@@ -124,13 +124,16 @@ export function computeReferralAnalytics(
   const uniqueProfIds = new Set(filteredReferralRows.map(r => r.referrerProfessionalId).filter(Boolean)).size;
   const uniqueTargetRefs = new Set(filteredReferralRows.map(r => r.referralTargetRef).filter(Boolean)).size;
   const distinctRefs = new Set(filteredReferralRows.map(r => r.referralRef).filter(Boolean)).size;
+  const initialTargetRefMap = new Map<string, string>();
+  filteredReferralRows.forEach(r => { const iRef = r.initialReferralTargetRef || ''; if (iRef && !initialTargetRefMap.has(iRef)) initialTargetRefMap.set(iRef, listingTitleLookup[iRef] || iRef); });
+  const distinctInitialTargetRefs = [...initialTargetRefMap.entries()].map(([ref, title]) => ({ ref, title })).sort((a, b) => a.ref.localeCompare(b.ref));
 
   return {
     total: filteredReferralRows.length, distinctRefs,
     uniqueSendingSites: new Set(filteredReferralRows.map(r => normalizeSiteNumber(r.srcsiteNum)).filter(Boolean)).size,
     uniqueTargetSites: new Set(filteredReferralRows.map(r => normalizeSiteNumber(r.siteNum)).filter(Boolean)).size,
     uniqueSenders: new Set(filteredReferralRows.map(r => r.referredByUserName).filter(Boolean)).size,
-    uniqueProfIds, uniqueTargetRefs,
+    uniqueProfIds, uniqueTargetRefs, distinctInitialTargetRefs,
     curMCount, curM, lastFullM, lastFullCount,
     chg1, cmp1M, cmp1Count, chg3, cmp3M, cmp3Count, chg12, cmp12M, cmp12Count, earliestDate,
     fhirCount, fhirPct: percentage(fhirCount, filteredReferralRows.length),

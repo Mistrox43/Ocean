@@ -30,6 +30,7 @@ export class ReferralAnalyticsAccumulator {
   private unknownListings = new Set<string>();
   private unknownSrcSites: Record<string, { name: string; count: number }> = {};
 
+  private initialTargetRefs = new Map<string, string>();
   private regionMap: Record<string, number> = {};
   private serviceMap: Record<string, number> = {};
   private clinTypeMap: Record<string, number> = {};
@@ -53,6 +54,8 @@ export class ReferralAnalyticsAccumulator {
     if (row.referredByUserName) this.uniqueSenders.add(row.referredByUserName);
     if (row.referrerProfessionalId) this.uniqueProfIds.add(row.referrerProfessionalId);
     if (row.referralTargetRef) this.uniqueTargetRefs.add(row.referralTargetRef);
+    const iRef = row.initialReferralTargetRef || '';
+    if (iRef && !this.initialTargetRefs.has(iRef)) this.initialTargetRefs.set(iRef, this.listingTitleLookup[iRef] || iRef);
 
     const fd = formatDate(row.referralCreationDate);
     if (fd && fd.length >= 7) {
@@ -141,9 +144,13 @@ export class ReferralAnalyticsAccumulator {
     const byEmrRecv = Object.entries(this.emrRecv).sort((a, b) => b[1] - a[1]).map(([l, v]) => ({ label: l || 'None', value: v }));
     const fhirCount = Object.entries(this.sourceTypeMap).filter(([k]) => k.toUpperCase().includes('FHIR')).reduce((s, e) => s + e[1], 0);
 
+    const distinctInitialTargetRefs = [...this.initialTargetRefs.entries()]
+      .map(([ref, title]) => ({ ref, title }))
+      .sort((a, b) => a.ref.localeCompare(b.ref));
+
     return {
       total: this.totalRows, distinctRefs: this.distinctRefs.size,
-      uniqueSendingSites: this.uniqueSendingSites.size, uniqueTargetSites: this.uniqueTargetSites.size, uniqueSenders: this.uniqueSenders.size, uniqueProfIds: this.uniqueProfIds.size, uniqueTargetRefs: this.uniqueTargetRefs.size,
+      uniqueSendingSites: this.uniqueSendingSites.size, uniqueTargetSites: this.uniqueTargetSites.size, uniqueSenders: this.uniqueSenders.size, uniqueProfIds: this.uniqueProfIds.size, uniqueTargetRefs: this.uniqueTargetRefs.size, distinctInitialTargetRefs,
       curMCount, curM, lastFullM, lastFullCount, chg1, cmp1M, cmp1Count, chg3, cmp3M, cmp3Count, chg12, cmp12M, cmp12Count, earliestDate: this.earliestDate,
       fhirCount, fhirPct: percentage(fhirCount, this.totalRows),
       timeline, weekly, byTarget, bySource, bySender,
