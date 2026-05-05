@@ -35,13 +35,16 @@ export type IngestMetadata = {
 };
 
 type WorkerMessage =
-  | { type: 'progress'; processed: number; total: number; pct: number; stage: string }
-  | { type: 'complete'; headerDiag: HeaderDiag[]; metadata: IngestMetadata; analytics: ReferralAnalytics | null }
-  | { type: 'filtered'; analytics: ReferralAnalytics | null }
-  | { type: 'error'; error: string };
+  | { type: 'progress'; requestId: number; processed: number; total: number; pct: number; stage: string }
+  | { type: 'complete'; requestId: number; headerDiag: HeaderDiag[]; metadata: IngestMetadata; analytics: ReferralAnalytics | null }
+  | { type: 'filtered'; requestId: number; analytics: ReferralAnalytics | null }
+  | { type: 'error'; requestId: number; error: string };
 
 export function useFileParser() {
   const workerRef = useRef<Worker | null>(null);
+  const requestIdRef = useRef(0);
+  const ingestRequestIdRef = useRef(0);
+  const filterRequestIdRef = useRef(0);
   const [headerDiag, setHeaderDiag] = useState<HeaderDiag[] | null>(null);
   const [progress, setProgress] = useState<ParseProgress | null>(null);
   const [metadata, setMetadata] = useState<IngestMetadata | null>(null);
@@ -56,6 +59,9 @@ export function useFileParser() {
 
   const reset = useCallback(() => {
     destroyWorker();
+    requestIdRef.current = 0;
+    ingestRequestIdRef.current = 0;
+    filterRequestIdRef.current = 0;
     setHeaderDiag(null);
     setProgress(null);
     setMetadata(null);
@@ -88,6 +94,9 @@ export function useFileParser() {
       destroyWorker();
       const worker = new FileParserWorker();
       workerRef.current = worker;
+      const requestId = ++requestIdRef.current;
+      ingestRequestIdRef.current = requestId;
+      filterRequestIdRef.current = requestId;
       setHeaderDiag(null);
       setMetadata(null);
       setAnalytics(null);
@@ -98,20 +107,23 @@ export function useFileParser() {
       worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
         const msg = event.data;
         if (msg.type === 'progress') {
+          if (msg.requestId !== ingestRequestIdRef.current) return;
           setProgress({ processed: msg.processed, total: msg.total, pct: msg.pct, stage: msg.stage });
           return;
         }
         if (msg.type === 'error') {
+          if (msg.requestId !== ingestRequestIdRef.current && msg.requestId !== filterRequestIdRef.current) return;
           setError(msg.error);
           setIsLoading(false);
-          destroyWorker();
           return;
         }
         if (msg.type === 'filtered') {
+          if (msg.requestId !== filterRequestIdRef.current) return;
           setAnalytics(msg.analytics);
           setIsLoading(false);
           return;
         }
+        if (msg.requestId !== ingestRequestIdRef.current) return;
         setHeaderDiag(msg.headerDiag);
         setMetadata(msg.metadata);
         setAnalytics(msg.analytics);
@@ -123,11 +135,11 @@ export function useFileParser() {
       const forceSmall = route === 'small';
 
       if (isCsv && (forceLarge || (!forceSmall && file.size >= LARGE_FILE_BYTES))) {
-        worker.postMessage({ type: 'parse-csv-stream', file, map, storageKey, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null, ingestRoute: route });
+        worker.postMessage({ type: 'parse-csv-stream', requestId, file, map, storageKey, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null, ingestRoute: route });
         return;
       }
       const buffer = await file.arrayBuffer();
-      worker.postMessage({ type: 'parse-small', buffer, map, fileName: file.name, fileSize: file.size, storageKey, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null, ingestRoute: route }, [buffer]);
+      worker.postMessage({ type: 'parse-small', requestId, buffer, map, fileName: file.name, fileSize: file.size, storageKey, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null, ingestRoute: route }, [buffer]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to ingest file.');
       setIsLoading(false);
@@ -137,9 +149,11 @@ export function useFileParser() {
 
   const recomputeFromStore = useCallback((storageKey: string, includeTest: boolean, regionRefs: string[], initialTargetRefs?: string[], raNames?: string[], ctx?: { sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null }) => {
     if (!workerRef.current) return;
+    const requestId = ++requestIdRef.current;
+    filterRequestIdRef.current = requestId;
     setIsLoading(true);
-    setProgress(p => p ? { ...p, stage: 'Applying filters from storage...' } : { processed: 0, total: 0, pct: 0, stage: 'Applying filters from storage...' });
-    workerRef.current.postMessage({ type: 'filter-from-store', storageKey, includeTest, regionRefs, initialTargetRefs: initialTargetRefs?.length ? initialTargetRefs : undefined, raNames: raNames?.length ? raNames : undefined, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null });
+    setProgress(p => p ? { ...p, stage: 'Applying filters...' } : { processed: 0, total: 0, pct: 0, stage: 'Applying filters...' });
+    workerRef.current.postMessage({ type: 'filter-from-store', requestId, storageKey, includeTest, regionRefs, initialTargetRefs: initialTargetRefs?.length ? initialTargetRefs : undefined, raNames: raNames?.length ? raNames : undefined, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null });
   }, []);
 
   useEffect(() => () => destroyWorker(), [destroyWorker]);

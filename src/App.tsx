@@ -1,11 +1,11 @@
-import { useState, useMemo, useEffect, useRef } from 'react';
+import { useState, useMemo, useEffect, useRef, useTransition, useDeferredValue, startTransition } from 'react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 import { COLORS, LISTING_MAP, SITE_MAP, USER_MAP, REFERRAL_MAP, USED_FIELDS, FIELD_DEFS } from './constants';
-import { percentage, formatNumber, parseFile, exportToExcel, exportToCSVStream, sortIcon, sortHeaderStyle, deltaColor } from './utils';
+import { percentage, formatNumber, exportToExcel, exportToCSVStream, sortIcon, sortHeaderStyle, deltaColor } from './utils';
 import { MiniBar, Bar, Donut, Area, Funnel, Geo, KPI, Upload } from './components/charts';
 import { useListingStats } from './hooks/useListingStats';
 import { useSiteStats } from './hooks/useSiteStats';
@@ -15,6 +15,7 @@ import { useStaffing } from './hooks/useStaffing';
 import { useDataQuality } from './hooks/useDataQuality';
 import { useReferralAnalytics } from './hooks/useReferralAnalytics';
 import { useFileParser, type IngestRoute } from './hooks/useFileParser';
+import { useTabularParser } from './hooks/useTabularParser';
 import { MultiSelectCombobox } from './components/MultiSelectCombobox';
 import type { HeaderDiag } from './types';
 
@@ -49,6 +50,10 @@ export default function App() {
   const [referralInitialTargetOptions,setReferralInitialTargetOptions]=useState<{ref:string;title:string}[]>([]);
   const lastOptionsStorageKeyRef=useRef('');
   const referralParser = useFileParser();
+  const listingParser = useTabularParser();
+  const siteParser = useTabularParser();
+  const userParser = useTabularParser();
+  const [, startFilterTransition] = useTransition();
   const chooseIngestRoute = (): IngestRoute => {
     const v = window.prompt('Choose parser path for this upload:\n- auto (recommended)\n- small\n- large', 'auto');
     if (v === 'small' || v === 'large') return v;
@@ -114,27 +119,33 @@ export default function App() {
   const staffing = useStaffing(filteredListings, filteredSites, userStats);
   const dataQuality = useDataQuality(filteredListings, filteredSites, filteredUsers);
 
+  const deferredStaffSearch=useDeferredValue(staffSearchQuery);
   const filteredStaff=useMemo(()=>{
     if(!staffing) return null;
     let r=staffing;
-    if(staffSearchQuery.trim()){const q=staffSearchQuery.toLowerCase();r=r.filter(s=>(s.siteName||'').toLowerCase().includes(q)||(s.siteNum||'').toLowerCase().includes(q));}
+    if(deferredStaffSearch.trim()){const q=deferredStaffSearch.toLowerCase();r=r.filter(s=>(s.siteName||'').toLowerCase().includes(q)||(s.siteNum||'').toLowerCase().includes(q));}
     return [...r].sort((a,b)=>{let av:any,bv:any;
       if(staffSortField==='siteName'){av=(a.siteName||'').toLowerCase();bv=(b.siteName||'').toLowerCase();}
       else if(staffSortField==='siteNum'){av=parseInt(a.siteNum)||0;bv=parseInt(b.siteNum)||0;}
       else{av=(a as any)[staffSortField]??0;bv=(b as any)[staffSortField]??0;}
       return av<bv?(staffSortDir==='asc'?-1:1):av>bv?(staffSortDir==='asc'?1:-1):0;
     });
-  },[staffing,staffSearchQuery,staffSortField,staffSortDir]);
+  },[staffing,deferredStaffSearch,staffSortField,staffSortDir]);
 
   const regionListingRefs=useMemo(()=>{
     if(selectedRegion==='__all__'||!listings) return null;
     let base=selectedRaNames.length?listings.filter(l=>selectedRaNames.includes(l.raName)):listings;
     return new Set(base.filter(l=>l.healthRegion===selectedRegion).map(l=>l.ref).filter(Boolean));
   },[listings,selectedRegion,selectedRaNames]);
+  const lastIngestSigRef = useRef('');
   useEffect(() => {
     const storageKey = referralParser.metadata?.storageKey;
     if (!storageKey) return;
-    if (includeTest && !regionListingRefs && !referralInitialTargetFilter.length && !selectedRaNames.length) return;
+    const sig = referralParser.metadata?.paritySignature || storageKey;
+    if (lastIngestSigRef.current !== sig) {
+      lastIngestSigRef.current = sig;
+      return;
+    }
     referralParser.recomputeFromStore(
       storageKey,
       includeTest,
@@ -143,7 +154,7 @@ export default function App() {
       selectedRaNames.length ? selectedRaNames : undefined,
       { sites, listings, users },
     );
-  }, [referralParser.metadata?.storageKey, referralParser.recomputeFromStore, includeTest, regionListingRefs, referralInitialTargetFilter, selectedRaNames, sites, listings, users]);
+  }, [referralParser.metadata?.storageKey, referralParser.metadata?.paritySignature, referralParser.recomputeFromStore, includeTest, regionListingRefs, referralInitialTargetFilter, selectedRaNames, sites, listings, users]);
   const referralAnalytics = useReferralAnalytics(null, null, sites, listings, users, referralParser.analytics);
   const referralIngestDiag = referralParser.metadata?.diagnostics;
   const referralIngestAcceptance = referralIngestDiag ? percentage(referralIngestDiag.acceptedRows, Math.max(referralIngestDiag.sourceRows, 1)) : 0;
@@ -153,22 +164,24 @@ export default function App() {
         : { label: 'Critical', color: COLORS.red }
     : null;
 
+  const deferredReferralSearch=useDeferredValue(referralSearchQuery);
   const filteredReferralData=useMemo(()=>{
     if(!referralAnalytics) return null;
     const list=referralSection==='target'?referralAnalytics.byTarget:referralSection==='source'?referralAnalytics.bySource:referralAnalytics.bySender;
     const pinned=list.filter((s:any)=>s.isUnknown);
     let r=list.filter((s:any)=>!s.isUnknown) as any[];
-    if(referralSearchQuery.trim()){const q=referralSearchQuery.toLowerCase();r=r.filter((s:any)=>Object.values(s).some(v=>typeof v==='string'&&v.toLowerCase().includes(q)));}
+    if(deferredReferralSearch.trim()){const q=deferredReferralSearch.toLowerCase();r=r.filter((s:any)=>Object.values(s).some(v=>typeof v==='string'&&v.toLowerCase().includes(q)));}
     r.sort((a:any,b:any)=>{let av=a[referralSortField]??0,bv=b[referralSortField]??0;if(typeof av==='string'){av=av.toLowerCase();bv=(bv as string).toLowerCase();}return av<bv?(referralSortDir==='asc'?-1:1):av>bv?(referralSortDir==='asc'?1:-1):0;});
     return [...pinned,...r];
-  },[referralAnalytics,referralSection,referralSearchQuery,referralSortField,referralSortDir]);
+  },[referralAnalytics,referralSection,deferredReferralSearch,referralSortField,referralSortDir]);
 
   const doRtSort=(f:string)=>{if(referralSortField===f)setReferralSortDir(d=>d==='asc'?'desc':'asc');else{setReferralSortField(f);setReferralSortDir('desc');}};
 
+  const deferredSiteSearch=useDeferredValue(siteSearchQuery);
   const filteredSiteMaturity=useMemo(()=>{
     if(!siteMaturity) return null;
     let r=siteMaturity;
-    if(siteSearchQuery.trim()){const q=siteSearchQuery.toLowerCase();r=r.filter(s=>(s.siteName||'').toLowerCase().includes(q)||(s.siteNum||'').toLowerCase().includes(q)||(s.emr||'').toLowerCase().includes(q));}
+    if(deferredSiteSearch.trim()){const q=deferredSiteSearch.toLowerCase();r=r.filter(s=>(s.siteName||'').toLowerCase().includes(q)||(s.siteNum||'').toLowerCase().includes(q)||(s.emr||'').toLowerCase().includes(q));}
     return [...r].sort((a,b)=>{let av:any,bv:any;
       if(siteSortField==='siteName'){av=(a.siteName||'').toLowerCase();bv=(b.siteName||'').toLowerCase();}
       else if(siteSortField==='emr'){av=(a.emr||'').toLowerCase();bv=(b.emr||'').toLowerCase();}
@@ -177,7 +190,7 @@ export default function App() {
       else{av=(a as any)[siteSortField]||0;bv=(b as any)[siteSortField]||0;}
       return av<bv?(siteSortDir==='asc'?-1:1):av>bv?(siteSortDir==='asc'?1:-1):0;
     });
-  },[siteMaturity,siteSearchQuery,siteSortField,siteSortDir]);
+  },[siteMaturity,deferredSiteSearch,siteSortField,siteSortDir]);
 
   const doSort=(f:string)=>{if(siteSortField===f)setSiteSortDir(d=>d==='asc'?'desc':'asc');else{setSiteSortField(f);setSiteSortDir('desc');}};
   const doStSort=(f:string)=>{if(staffSortField===f)setStaffSortDir(d=>d==='asc'?'desc':'asc');else{setStaffSortField(f);setStaffSortDir('desc');}};
@@ -196,18 +209,18 @@ export default function App() {
           {([['Listings',listings?listings.length:null],['Sites',sites?sites.length:null],['Users',users?users.length:null],['Referrals',referralParser.metadata?.rowCount??(referralsLoaded?0:null)]] as [string,number|null][]).map(([l,d])=><span key={l} style={{fontSize:12,padding:'4px 10px',borderRadius:6,background:d!==null?COLORS.greenDark:'transparent',color:d!==null?COLORS.green:COLORS.dimmed,border:'1px solid '+(d!==null?COLORS.green+'66':COLORS.border),fontWeight:600}}>{l} {d!==null?d:'—'}</span>)}
           {listings&&testCount>0&&<div style={{display:'flex',alignItems:'center',gap:8,marginLeft:8,padding:'4px 12px',borderRadius:6,background:includeTest?'transparent':COLORS.amber+'18',border:'1px solid '+(includeTest?COLORS.border:COLORS.amber+'66')}}>
             <span style={{fontSize:12,color:includeTest?COLORS.dimmed:COLORS.amber,fontWeight:500}}>Test Listings</span>
-            <div onClick={()=>setIncludeTest(p=>!p)} style={{width:36,height:20,borderRadius:10,background:includeTest?COLORS.green+'66':COLORS.border,cursor:'pointer',position:'relative',transition:'background 0.2s'}}>
+            <div onClick={()=>startFilterTransition(()=>setIncludeTest(p=>!p))} style={{width:36,height:20,borderRadius:10,background:includeTest?COLORS.green+'66':COLORS.border,cursor:'pointer',position:'relative',transition:'background 0.2s'}}>
               <div style={{width:16,height:16,borderRadius:8,background:includeTest?COLORS.green:'#fff',position:'absolute',top:2,left:includeTest?18:2,transition:'left 0.2s, background 0.2s',boxShadow:'0 1px 3px rgba(0,0,0,0.3)'}}/>
             </div>
           </div>}
-          {listings&&uniqueRegions.length>1&&<Select value={selectedRegion} onValueChange={setSelectedRegion}>
+          {listings&&uniqueRegions.length>1&&<Select value={selectedRegion} onValueChange={v=>startFilterTransition(()=>setSelectedRegion(v))}>
             <SelectTrigger style={{width:200,background:COLORS.card,border:'1px solid '+COLORS.border,color:COLORS.text,fontSize:12,height:28,borderRadius:6}}><SelectValue placeholder='All Regions'/></SelectTrigger>
             <SelectContent>
               <SelectItem value='__all__'>All Regions</SelectItem>
               {uniqueRegions.map(r=><SelectItem key={r} value={r}>{r}</SelectItem>)}
             </SelectContent>
           </Select>}
-          {uniqueRaNames.length>0&&<MultiSelectCombobox options={uniqueRaNames.map(n=>({ref:n,title:n}))} value={selectedRaNames} onChange={setSelectedRaNames} placeholder='All RA Names' width={180}/>}
+          {uniqueRaNames.length>0&&<MultiSelectCombobox options={uniqueRaNames.map(n=>({ref:n,title:n}))} value={selectedRaNames} onChange={v=>startFilterTransition(()=>setSelectedRaNames(v))} placeholder='All RA Names' width={180}/>}
         </div>
       </div>
     </div>
@@ -217,14 +230,14 @@ export default function App() {
           <span style={{fontSize:13,color:COLORS.blue,fontWeight:600}}>Filtered to: {selectedRegion}</span>
           <span style={{fontSize:12,color:COLORS.muted}}>— showing {filteredListings?.length.toLocaleString()} of {listings.length.toLocaleString()} listings across all tabs</span>
         </div>
-        <button onClick={()=>setSelectedRegion('__all__')} style={{fontSize:11,color:COLORS.blue,background:'transparent',border:'1px solid '+COLORS.blue+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Show All Regions</button>
+        <button onClick={()=>startFilterTransition(()=>setSelectedRegion('__all__'))} style={{fontSize:11,color:COLORS.blue,background:'transparent',border:'1px solid '+COLORS.blue+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Show All Regions</button>
       </div>}
       {selectedRaNames.length>0&&<div style={{background:COLORS.purple+'15',border:'1px solid '+COLORS.purple+'44',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
           <span style={{fontSize:13,color:COLORS.purple,fontWeight:600}}>RA Name filter: {selectedRaNames.join(', ')}</span>
           <span style={{fontSize:12,color:COLORS.muted}}>— data scoped to selected RA{selectedRaNames.length!==1?'s':''} across all tabs</span>
         </div>
-        <button onClick={()=>setSelectedRaNames([])} style={{fontSize:11,color:COLORS.purple,background:'transparent',border:'1px solid '+COLORS.purple+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Show All</button>
+        <button onClick={()=>startFilterTransition(()=>setSelectedRaNames([]))} style={{fontSize:11,color:COLORS.purple,background:'transparent',border:'1px solid '+COLORS.purple+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Show All</button>
       </div>}
       {!includeTest&&listings&&<div style={{background:COLORS.amber+'15',border:'1px solid '+COLORS.amber+'44',borderRadius:8,padding:'10px 16px',marginBottom:16,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
@@ -232,14 +245,14 @@ export default function App() {
           <span style={{fontSize:13,color:COLORS.amber,fontWeight:600}}>Excluding {testCount} test listing{testCount!==1?'s':''}{referralsLoaded&&referralParser.metadata?' and referral test rows in analytics':''}</span>
           <span style={{fontSize:12,color:COLORS.muted}}>— showing {(listings.length-testCount).toLocaleString()} of {listings.length.toLocaleString()} listings{referralsLoaded&&referralParser.metadata&&referralAnalytics?' and '+referralAnalytics.total.toLocaleString()+' referral rows in current filter':''} across all tabs</span>
         </div>
-        <button onClick={()=>setIncludeTest(true)} style={{fontSize:11,color:COLORS.amber,background:'transparent',border:'1px solid '+COLORS.amber+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Include All</button>
+        <button onClick={()=>startFilterTransition(()=>setIncludeTest(true))} style={{fontSize:11,color:COLORS.amber,background:'transparent',border:'1px solid '+COLORS.amber+'44',borderRadius:4,padding:'3px 10px',cursor:'pointer',fontWeight:600}}>Include All</button>
       </div>}
       {!allLoaded&&<div style={{marginBottom:32}}>
         <h2 style={{fontSize:16,fontWeight:700,marginBottom:16,color:COLORS.muted}}>Load your Regional Authority export files to begin</h2>
         <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:16}}>
-          <Upload label='Export Listings' desc='Upload the Listings export (.xlsx)' loaded={!!listings&&listings.length>0} error={parseErrors.listings} onError={message=>setParseErrors(p=>({...p,listings:message}))} onLoad={buf=>{const r=parseFile(buf,LISTING_MAP);if(r.error){setParseErrors(p=>({...p,listings:r.error||'Unable to parse Listings file.'}));return;}setParseErrors(p=>({...p,listings:''}));setListings(r.rows);setListingHeaders(r.headerDiag);}}/>
-          <Upload label='Export Sites' desc='Upload the Sites export (.xlsx)' loaded={!!sites&&sites.length>0} error={parseErrors.sites} onError={message=>setParseErrors(p=>({...p,sites:message}))} onLoad={buf=>{const r=parseFile(buf,SITE_MAP);if(r.error){setParseErrors(p=>({...p,sites:r.error||'Unable to parse Sites file.'}));return;}setParseErrors(p=>({...p,sites:''}));setSites(r.rows);setSiteHeaders(r.headerDiag);}}/>
-          <Upload label='Export Users' desc='Upload the Users export (.xlsx)' loaded={!!users&&users.length>0} error={parseErrors.users} onError={message=>setParseErrors(p=>({...p,users:message}))} onLoad={buf=>{const r=parseFile(buf,USER_MAP);if(r.error){setParseErrors(p=>({...p,users:r.error||'Unable to parse Users file.'}));return;}setParseErrors(p=>({...p,users:''}));setUsers(r.rows);setUserHeaders(r.headerDiag);}}/>
+          <Upload label='Export Listings' desc='Upload the Listings export (.xlsx)' loaded={!!listings&&listings.length>0} error={parseErrors.listings} onError={message=>setParseErrors(p=>({...p,listings:message}))} isLoading={listingParser.isLoading} onFile={async file=>{try{const r=await listingParser.parse(file,LISTING_MAP);startTransition(()=>{setListings(r.rows);setListingHeaders(r.headerDiag);});setParseErrors(p=>({...p,listings:''}));}catch(err){setParseErrors(p=>({...p,listings:err instanceof Error?err.message:'Unable to parse Listings file.'}));}}}/>
+          <Upload label='Export Sites' desc='Upload the Sites export (.xlsx)' loaded={!!sites&&sites.length>0} error={parseErrors.sites} onError={message=>setParseErrors(p=>({...p,sites:message}))} isLoading={siteParser.isLoading} onFile={async file=>{try{const r=await siteParser.parse(file,SITE_MAP);startTransition(()=>{setSites(r.rows);setSiteHeaders(r.headerDiag);});setParseErrors(p=>({...p,sites:''}));}catch(err){setParseErrors(p=>({...p,sites:err instanceof Error?err.message:'Unable to parse Sites file.'}));}}}/>
+          <Upload label='Export Users' desc='Upload the Users export (.xlsx)' loaded={!!users&&users.length>0} error={parseErrors.users} onError={message=>setParseErrors(p=>({...p,users:message}))} isLoading={userParser.isLoading} onFile={async file=>{try{const r=await userParser.parse(file,USER_MAP);startTransition(()=>{setUsers(r.rows);setUserHeaders(r.headerDiag);});setParseErrors(p=>({...p,users:''}));}catch(err){setParseErrors(p=>({...p,users:err instanceof Error?err.message:'Unable to parse Users file.'}));}}}/>
           <Upload label='Referral Analytics' desc='Upload the Referral Analytics export (.xlsx or .csv)' loaded={referralsLoaded} error={parseErrors.referrals} onError={message=>setParseErrors(p=>({...p,referrals:message}))} isLoading={referralParser.isLoading} progress={referralParser.progress} onFile={file=>{setParseErrors(p=>({...p,referrals:''}));const route=chooseIngestRoute();referralParser.ingest(file,REFERRAL_MAP,USED_FIELDS,'referrals',{sites,listings,users},route);}}/>
         </div>
         {Object.values(parseErrors).some(Boolean)&&<div style={{marginTop:12,display:'grid',gap:6}}>
@@ -550,7 +563,7 @@ export default function App() {
                   )}
                 </div>
                 <div style={{display:'flex',gap:10,alignItems:'center'}}>
-                  {referralInitialTargetOptions.length>0&&<MultiSelectCombobox options={referralInitialTargetOptions} value={referralInitialTargetFilter} onChange={v=>{setReferralInitialTargetFilter(v);setReferralExpanded(null);}} placeholder='All Initial Targets' width={220}/>}
+                  {referralInitialTargetOptions.length>0&&<MultiSelectCombobox options={referralInitialTargetOptions} value={referralInitialTargetFilter} onChange={v=>startFilterTransition(()=>{setReferralInitialTargetFilter(v);setReferralExpanded(null);})} placeholder='All Initial Targets' width={220}/>}
                   <input type='text' placeholder='Search...' value={referralSearchQuery} onChange={e=>setReferralSearchQuery(e.target.value)} style={{background:COLORS.background,border:'1px solid '+COLORS.border,borderRadius:6,padding:'7px 12px',color:COLORS.text,fontSize:13,width:200,outline:'none'}}/>
                   <span style={{fontSize:12,color:COLORS.dimmed,background:COLORS.border,padding:'2px 8px',borderRadius:10}}>{filteredReferralData.length} results</span>
                   {referralParser.metadata?.storageKey&&<button onClick={()=>{void exportToCSVStream(referralParser.metadata!.storageKey,'referral-data-'+new Date().toISOString().slice(0,10)+'.csv').catch((err: any)=>{if(err?.name==='AbortError') return; setParseErrors(p=>({...p,referrals:err?.message||'Failed to export referral data.'}));});}} style={{background:'linear-gradient(135deg,'+COLORS.accent+'22,'+COLORS.accent+'11)',border:'1px solid '+COLORS.accent+'44',borderRadius:6,padding:'7px 16px',color:COLORS.accent,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>Export Referral Data</button>}

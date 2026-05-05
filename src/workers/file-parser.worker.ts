@@ -1,22 +1,32 @@
 /// <reference lib="webworker" />
 import * as XLSX from 'xlsx';
-import type { HeaderDiag } from '@/types';
+import type { HeaderDiag, ReferralAnalytics } from '@/types';
 import { createRowStore, type RowStore } from '@/storage/rowStore';
 import { ReferralAnalyticsAccumulator } from '@/lib/referralAnalyticsAccumulator';
 import { formatDate } from '@/utils';
 
+type Ctx = {
+  sites: Record<string, string>[] | null;
+  listings: Record<string, string>[] | null;
+  users: Record<string, string>[] | null;
+};
+
 type WorkerRequest =
-  | { type: 'parse-small'; buffer: ArrayBuffer; map: Record<string, string>; fileName: string; fileSize: number; storageKey: string; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null; ingestRoute: 'auto' | 'small' | 'large' }
-  | { type: 'parse-csv-stream'; file: File; map: Record<string, string>; storageKey: string; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null; ingestRoute: 'auto' | 'small' | 'large' }
-  | { type: 'filter-from-store'; storageKey: string; includeTest: boolean; regionRefs?: string[]; initialTargetRefs?: string[]; raNames?: string[]; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null };
+  | { type: 'parse-small'; requestId: number; buffer: ArrayBuffer; map: Record<string, string>; fileName: string; fileSize: number; storageKey: string; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null; ingestRoute: 'auto' | 'small' | 'large' }
+  | { type: 'parse-csv-stream'; requestId: number; file: File; map: Record<string, string>; storageKey: string; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null; ingestRoute: 'auto' | 'small' | 'large' }
+  | { type: 'filter-from-store'; requestId: number; storageKey: string; includeTest: boolean; regionRefs?: string[]; initialTargetRefs?: string[]; raNames?: string[]; sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null }
+  | { type: 'parse-tabular'; requestId: number; buffer: ArrayBuffer; map: Record<string, string> };
 
 type ProgressMessage = {
   type: 'progress';
+  requestId: number;
   processed: number;
   total: number;
   pct: number;
   stage: string;
 };
+
+const MEMORY_CACHE_LIMIT = 2_000_000;
 
 const normalize = (v: unknown): string => {
   const sv = typeof v === 'boolean' ? (v ? 'TRUE' : 'FALSE') : String(v ?? '').trim();
@@ -25,9 +35,9 @@ const normalize = (v: unknown): string => {
 
 const mapHeader = (header: string, map: Record<string, string>): string => map[header] || map[header.toLowerCase()] || header;
 
-const postProgress = (processed: number, total: number, stage: string) => {
+const postProgress = (requestId: number, processed: number, total: number, stage: string) => {
   const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 1000) / 10) : 0;
-  const message: ProgressMessage = { type: 'progress', processed, total, pct, stage };
+  const message: ProgressMessage = { type: 'progress', requestId, processed, total, pct, stage };
   self.postMessage(message);
 };
 
@@ -37,10 +47,40 @@ const getStore = async () => {
   return rowStore;
 };
 
-const processCsvStreaming = async (file: File, map: Record<string, string>, storageKey: string, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null, ingestRoute: 'auto' | 'small' | 'large') => {
+let cachedRows: Record<string, string>[] | null = null;
+let cachedStorageKey = '';
+let baseAnalytics: ReferralAnalytics | null = null;
+
+const noFilters = (includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined) =>
+  includeTest && regionRefs.length === 0 && (!initialTargetRefs || !initialTargetRefs.length) && (!raNames || !raNames.length);
+
+const runFilter = (
+  rows: Iterable<Record<string, string>>,
+  includeTest: boolean,
+  refSet: Set<string> | null,
+  initialTargetSet: Set<string> | null,
+  raNameSet: Set<string> | null,
+  ctx: Ctx,
+): ReferralAnalytics => {
+  const acc = new ReferralAnalyticsAccumulator(ctx);
+  for (const row of rows) {
+    if (!includeTest && row.sentToTestListing === 'TRUE') continue;
+    if (refSet && !refSet.has(row.referralTargetRef)) continue;
+    if (initialTargetSet && !initialTargetSet.has(row.initialReferralTargetRef)) continue;
+    if (raNameSet && !raNameSet.has(row.raName)) continue;
+    acc.add(row);
+  }
+  return acc.finalize();
+};
+
+const processCsvStreaming = async (requestId: number, file: File, map: Record<string, string>, storageKey: string, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null, ingestRoute: 'auto' | 'small' | 'large') => {
   const store = await getStore();
   await store.open(storageKey);
   await store.clear(storageKey);
+  cachedRows = [];
+  cachedStorageKey = storageKey;
+  baseAnalytics = null;
+  const memoryCache: Record<string, string>[] = cachedRows;
   const reader = file.stream().getReader();
   const decoder = new TextDecoder();
   let carry = '';
@@ -69,7 +109,8 @@ const processCsvStreaming = async (file: File, map: Record<string, string>, stor
   let inQuotes = false;
   let field = '';
   let rowParts: string[] = [];
-  const processParts = async (parts: string[]) => {
+  let lastProgressBytes = 0;
+  const processParts = (parts: string[]) => {
     if (!parts.length || (parts.length === 1 && !parts[0].trim())) return;
     if (!headersRaw) {
       headersRaw = parts.map(p => p.trim());
@@ -117,13 +158,10 @@ const processCsvStreaming = async (file: File, map: Record<string, string>, stor
     row.referralCreationDate = d;
     acc.add(row);
     appendBuffer.push(row);
-    if (appendBuffer.length >= 10000) {
-      await store.appendBatch(appendBuffer);
-      appendBuffer = [];
-    }
+    if (memoryCache && memoryCache.length < MEMORY_CACHE_LIMIT) memoryCache.push(row);
   };
 
-  postProgress(0, file.size, 'Reading CSV...');
+  postProgress(requestId, 0, file.size, 'Reading CSV...');
 
   while (true) {
     const { value, done } = await reader.read();
@@ -148,25 +186,33 @@ const processCsvStreaming = async (file: File, map: Record<string, string>, stor
         if (c === '\r' && carry[i + 1] === '\n') i++;
         rowParts.push(field);
         field = '';
-        await processParts(rowParts);
+        processParts(rowParts);
         rowParts = [];
       } else {
         field += c;
       }
     }
     carry = '';
+    if (appendBuffer.length >= 50000) {
+      await store.appendBatch(appendBuffer);
+      appendBuffer = [];
+    }
     const totalIssues = mismatchedRows + missingRequiredRows;
     if (totalParsedRows > 1000 && totalIssues / totalParsedRows > corruptionThreshold) throw new Error(`Large CSV parse validation failed (mismatch=${mismatchedRows}, missingRequired=${missingRequiredRows}, invalidDate=${invalidDateRows}). Try the small parser path for comparison.`);
-    postProgress(processedBytes, file.size, 'Parsing CSV rows...');
+    if (processedBytes - lastProgressBytes >= 1024 * 1024) {
+      lastProgressBytes = processedBytes;
+      postProgress(requestId, processedBytes, file.size, 'Parsing CSV rows...');
+    }
   }
 
   const finalChunk = decoder.decode();
   if (finalChunk) field += finalChunk;
   if (field.length > 0 || rowParts.length > 0) {
     rowParts.push(field);
-    await processParts(rowParts);
+    processParts(rowParts);
   }
   if (appendBuffer.length) await store.appendBatch(appendBuffer);
+  await store.finalizeAppend();
 
   const hdrs = (headersRaw || []) as string[];
   const headerDiag: HeaderDiag[] = hdrs.map((h, i) => ({
@@ -177,8 +223,12 @@ const processCsvStreaming = async (file: File, map: Record<string, string>, stor
   }));
 
   const analytics = acc.finalize();
+  baseAnalytics = analytics;
+  if (cachedRows && cachedRows.length >= MEMORY_CACHE_LIMIT) cachedRows = null;
+  postProgress(requestId, file.size, file.size, 'Completed');
   self.postMessage({
     type: 'complete',
+    requestId,
     headerDiag,
     analytics,
     metadata: {
@@ -203,15 +253,35 @@ const processCsvStreaming = async (file: File, map: Record<string, string>, stor
   });
 };
 
-const filterFromStore = async (storageKey: string, includeTest: boolean, regionRefs: string[] = [], initialTargetRefs: string[] | undefined, raNames: string[] | undefined, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null) => {
+const filterFromStore = async (requestId: number, storageKey: string, includeTest: boolean, regionRefs: string[] = [], initialTargetRefs: string[] | undefined, raNames: string[] | undefined, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null) => {
+  const ctx: Ctx = { sites, listings, users };
+  const noFilter = noFilters(includeTest, regionRefs, initialTargetRefs, raNames);
+
+  if (noFilter && baseAnalytics && cachedStorageKey === storageKey) {
+    self.postMessage({ type: 'filtered', requestId, analytics: baseAnalytics });
+    return;
+  }
+
+  if (cachedRows && cachedStorageKey === storageKey) {
+    const refSet = regionRefs.length ? new Set(regionRefs) : null;
+    const initialTargetSet = initialTargetRefs?.length ? new Set(initialTargetRefs) : null;
+    const raNameSet = raNames?.length ? new Set(raNames) : null;
+    const analytics = runFilter(cachedRows, includeTest, refSet, initialTargetSet, raNameSet, ctx);
+    if (noFilter) baseAnalytics = analytics;
+    self.postMessage({ type: 'filtered', requestId, analytics });
+    return;
+  }
+
   const store = await getStore();
   await store.open(storageKey);
   const refSet = regionRefs.length ? new Set(regionRefs) : null;
   const initialTargetSet = initialTargetRefs?.length ? new Set(initialTargetRefs) : null;
   const raNameSet = raNames?.length ? new Set(raNames) : null;
-  const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
-  for await (const batch of store.streamRead(10000)) {
+  const acc = new ReferralAnalyticsAccumulator(ctx);
+  const rebuiltCache: Record<string, string>[] | null = noFilter && cachedStorageKey === storageKey ? [] : null;
+  for await (const batch of store.streamRead(50000)) {
     for (const row of batch) {
+      if (rebuiltCache && rebuiltCache.length < MEMORY_CACHE_LIMIT) rebuiltCache.push(row);
       if (!includeTest && row.sentToTestListing === 'TRUE') continue;
       if (refSet && !refSet.has(row.referralTargetRef)) continue;
       if (initialTargetSet && !initialTargetSet.has(row.initialReferralTargetRef)) continue;
@@ -220,20 +290,19 @@ const filterFromStore = async (storageKey: string, includeTest: boolean, regionR
     }
   }
   const analytics = acc.finalize();
-  self.postMessage({ type: 'filtered', analytics });
+  if (noFilter) {
+    baseAnalytics = analytics;
+    if (rebuiltCache && rebuiltCache.length < MEMORY_CACHE_LIMIT) cachedRows = rebuiltCache;
+  }
+  self.postMessage({ type: 'filtered', requestId, analytics });
 };
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   const msg = event.data;
   try {
-    if (msg.type === 'parse-small') {
-      const store = await getStore();
-      await store.open(msg.storageKey);
-      await store.clear(msg.storageKey);
-      postProgress(0, 100, 'Reading workbook...');
+    if (msg.type === 'parse-tabular') {
       const wb = XLSX.read(msg.buffer, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
-      postProgress(35, 100, 'Converting sheet to rows...');
       const raw: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
       const headerDiag: HeaderDiag[] = [];
       if (raw.length > 0) {
@@ -246,24 +315,66 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
           });
         }
       }
-      postProgress(70, 100, 'Mapping fields...');
+      const rows: Record<string, string>[] = new Array(raw.length);
+      for (let i = 0; i < raw.length; i++) {
+        const src = raw[i];
+        const out: Record<string, string> = {};
+        for (const k in src) out[mapHeader(k, msg.map)] = normalize(src[k]);
+        rows[i] = out;
+      }
+      self.postMessage({ type: 'tabular-complete', requestId: msg.requestId, rows, headerDiag });
+      return;
+    }
+    if (msg.type === 'parse-small') {
+      const store = await getStore();
+      await store.open(msg.storageKey);
+      await store.clear(msg.storageKey);
+      cachedRows = [];
+      cachedStorageKey = msg.storageKey;
+      baseAnalytics = null;
+      const memoryCache: Record<string, string>[] = cachedRows;
+      postProgress(msg.requestId, 0, 100, 'Reading workbook...');
+      const wb = XLSX.read(msg.buffer, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      postProgress(msg.requestId, 35, 100, 'Converting sheet to rows...');
+      const raw: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
+      const headerDiag: HeaderDiag[] = [];
+      if (raw.length > 0) {
+        for (const k of Object.keys(raw[0])) {
+          headerDiag.push({
+            raw: k,
+            mapped: mapHeader(k, msg.map),
+            inMap: !!(msg.map[k] || msg.map[k.toLowerCase()]),
+            sample: normalize(raw[0][k]).slice(0, 60),
+          });
+        }
+      }
+      postProgress(msg.requestId, 70, 100, 'Mapping fields...');
       const acc = new ReferralAnalyticsAccumulator({ sites: msg.sites, listings: msg.listings, users: msg.users });
-      const batch: Record<string, string>[] = [];
-      for (const row of raw) {
+      let batch: Record<string, string>[] = [];
+      for (let i = 0; i < raw.length; i++) {
+        const src = raw[i];
         const mapped: Record<string, string> = {};
-        for (const [k, v] of Object.entries(row)) mapped[mapHeader(k, msg.map)] = normalize(v);
+        for (const k in src) mapped[mapHeader(k, msg.map)] = normalize(src[k]);
         acc.add(mapped);
         batch.push(mapped);
-        if (batch.length >= 10000) {
-          await store.appendBatch(batch.splice(0, batch.length));
+        if (memoryCache.length < MEMORY_CACHE_LIMIT) memoryCache.push(mapped);
+        if (batch.length >= 50000) {
+          await store.appendBatch(batch);
+          batch = [];
         }
       }
       if (batch.length) await store.appendBatch(batch);
-      postProgress(100, 100, 'Completed');
+      await store.finalizeAppend();
+      postProgress(msg.requestId, 100, 100, 'Completed');
+      const analytics = acc.finalize();
+      baseAnalytics = analytics;
+      if (cachedRows && cachedRows.length >= MEMORY_CACHE_LIMIT) cachedRows = null;
       self.postMessage({
         type: 'complete',
+        requestId: msg.requestId,
         headerDiag,
-        analytics: acc.finalize(),
+        analytics,
         metadata: {
           parser: 'xlsx-worker',
           ingestRoute: msg.ingestRoute,
@@ -285,12 +396,12 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       return;
     }
     if (msg.type === 'parse-csv-stream') {
-      await processCsvStreaming(msg.file, msg.map, msg.storageKey, msg.sites, msg.listings, msg.users, msg.ingestRoute);
+      await processCsvStreaming(msg.requestId, msg.file, msg.map, msg.storageKey, msg.sites, msg.listings, msg.users, msg.ingestRoute);
       return;
     }
-    await filterFromStore(msg.storageKey, msg.includeTest, msg.regionRefs, msg.initialTargetRefs, msg.raNames, msg.sites, msg.listings, msg.users);
+    await filterFromStore(msg.requestId, msg.storageKey, msg.includeTest, msg.regionRefs, msg.initialTargetRefs, msg.raNames, msg.sites, msg.listings, msg.users);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unable to parse file.';
-    self.postMessage({ type: 'error', error: message });
+    self.postMessage({ type: 'error', requestId: msg.requestId, error: message });
   }
 };
