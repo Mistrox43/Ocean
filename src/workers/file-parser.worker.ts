@@ -26,8 +26,6 @@ type ProgressMessage = {
   stage: string;
 };
 
-const MEMORY_CACHE_LIMIT = 2_000_000;
-
 const normalize = (v: unknown): string => {
   const sv = typeof v === 'boolean' ? (v ? 'TRUE' : 'FALSE') : String(v ?? '').trim();
   return sv === 'true' || sv === 'false' ? sv.toUpperCase() : sv;
@@ -47,40 +45,18 @@ const getStore = async () => {
   return rowStore;
 };
 
-let cachedRows: Record<string, string>[] | null = null;
 let cachedStorageKey = '';
 let baseAnalytics: ReferralAnalytics | null = null;
 
 const noFilters = (includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined) =>
   includeTest && regionRefs.length === 0 && (!initialTargetRefs || !initialTargetRefs.length) && (!raNames || !raNames.length);
 
-const runFilter = (
-  rows: Iterable<Record<string, string>>,
-  includeTest: boolean,
-  refSet: Set<string> | null,
-  initialTargetSet: Set<string> | null,
-  raNameSet: Set<string> | null,
-  ctx: Ctx,
-): ReferralAnalytics => {
-  const acc = new ReferralAnalyticsAccumulator(ctx);
-  for (const row of rows) {
-    if (!includeTest && row.sentToTestListing === 'TRUE') continue;
-    if (refSet && !refSet.has(row.referralTargetRef)) continue;
-    if (initialTargetSet && !initialTargetSet.has(row.initialReferralTargetRef)) continue;
-    if (raNameSet && !raNameSet.has(row.raName)) continue;
-    acc.add(row);
-  }
-  return acc.finalize();
-};
-
 const processCsvStreaming = async (requestId: number, file: File, map: Record<string, string>, storageKey: string, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null, ingestRoute: 'auto' | 'small' | 'large') => {
   const store = await getStore();
   await store.open(storageKey);
   await store.clear(storageKey);
-  cachedRows = [];
   cachedStorageKey = storageKey;
   baseAnalytics = null;
-  const memoryCache: Record<string, string>[] = cachedRows;
   const reader = file.stream().getReader();
   const decoder = new TextDecoder();
   let carry = '';
@@ -158,7 +134,6 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
     row.referralCreationDate = d;
     acc.add(row);
     appendBuffer.push(row);
-    if (memoryCache && memoryCache.length < MEMORY_CACHE_LIMIT) memoryCache.push(row);
   };
 
   postProgress(requestId, 0, file.size, 'Reading CSV...');
@@ -193,7 +168,7 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
       }
     }
     carry = '';
-    if (appendBuffer.length >= 50000) {
+    if (appendBuffer.length >= 20000) {
       await store.appendBatch(appendBuffer);
       appendBuffer = [];
     }
@@ -224,7 +199,6 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
 
   const analytics = acc.finalize();
   baseAnalytics = analytics;
-  if (cachedRows && cachedRows.length >= MEMORY_CACHE_LIMIT) cachedRows = null;
   postProgress(requestId, file.size, file.size, 'Completed');
   self.postMessage({
     type: 'complete',
@@ -262,26 +236,14 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
     return;
   }
 
-  if (cachedRows && cachedStorageKey === storageKey) {
-    const refSet = regionRefs.length ? new Set(regionRefs) : null;
-    const initialTargetSet = initialTargetRefs?.length ? new Set(initialTargetRefs) : null;
-    const raNameSet = raNames?.length ? new Set(raNames) : null;
-    const analytics = runFilter(cachedRows, includeTest, refSet, initialTargetSet, raNameSet, ctx);
-    if (noFilter) baseAnalytics = analytics;
-    self.postMessage({ type: 'filtered', requestId, analytics });
-    return;
-  }
-
   const store = await getStore();
   await store.open(storageKey);
   const refSet = regionRefs.length ? new Set(regionRefs) : null;
   const initialTargetSet = initialTargetRefs?.length ? new Set(initialTargetRefs) : null;
   const raNameSet = raNames?.length ? new Set(raNames) : null;
   const acc = new ReferralAnalyticsAccumulator(ctx);
-  const rebuiltCache: Record<string, string>[] | null = noFilter && cachedStorageKey === storageKey ? [] : null;
   for await (const batch of store.streamRead(50000)) {
     for (const row of batch) {
-      if (rebuiltCache && rebuiltCache.length < MEMORY_CACHE_LIMIT) rebuiltCache.push(row);
       if (!includeTest && row.sentToTestListing === 'TRUE') continue;
       if (refSet && !refSet.has(row.referralTargetRef)) continue;
       if (initialTargetSet && !initialTargetSet.has(row.initialReferralTargetRef)) continue;
@@ -290,10 +252,7 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
     }
   }
   const analytics = acc.finalize();
-  if (noFilter) {
-    baseAnalytics = analytics;
-    if (rebuiltCache && rebuiltCache.length < MEMORY_CACHE_LIMIT) cachedRows = rebuiltCache;
-  }
+  if (noFilter) baseAnalytics = analytics;
   self.postMessage({ type: 'filtered', requestId, analytics });
 };
 
@@ -329,10 +288,8 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       const store = await getStore();
       await store.open(msg.storageKey);
       await store.clear(msg.storageKey);
-      cachedRows = [];
       cachedStorageKey = msg.storageKey;
       baseAnalytics = null;
-      const memoryCache: Record<string, string>[] = cachedRows;
       postProgress(msg.requestId, 0, 100, 'Reading workbook...');
       const wb = XLSX.read(msg.buffer, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
@@ -358,8 +315,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         for (const k in src) mapped[mapHeader(k, msg.map)] = normalize(src[k]);
         acc.add(mapped);
         batch.push(mapped);
-        if (memoryCache.length < MEMORY_CACHE_LIMIT) memoryCache.push(mapped);
-        if (batch.length >= 50000) {
+        if (batch.length >= 20000) {
           await store.appendBatch(batch);
           batch = [];
         }
@@ -369,7 +325,6 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       postProgress(msg.requestId, 100, 100, 'Completed');
       const analytics = acc.finalize();
       baseAnalytics = analytics;
-      if (cachedRows && cachedRows.length >= MEMORY_CACHE_LIMIT) cachedRows = null;
       self.postMessage({
         type: 'complete',
         requestId: msg.requestId,

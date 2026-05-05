@@ -49,11 +49,15 @@ class OPFSRowStore implements RowStore {
   async appendBatch(rows: Record<string, string>[]): Promise<void> {
     if (!rows.length) return;
     const handle = await this.ensureWriteHandle();
-    let payload = '';
-    for (let i = 0; i < rows.length; i++) payload += JSON.stringify(rows[i]) + '\n';
-    const bytes = this.encoder.encode(payload);
-    handle.write(bytes, { at: this.writeOffset });
-    this.writeOffset += bytes.byteLength;
+    const sliceSize = 2000;
+    for (let start = 0; start < rows.length; start += sliceSize) {
+      const end = Math.min(start + sliceSize, rows.length);
+      const lines: string[] = new Array(end - start);
+      for (let i = start; i < end; i++) lines[i - start] = JSON.stringify(rows[i]);
+      const bytes = this.encoder.encode(lines.join('\n') + '\n');
+      handle.write(bytes, { at: this.writeOffset });
+      this.writeOffset += bytes.byteLength;
+    }
     this.rowCount += rows.length;
   }
 
