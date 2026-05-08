@@ -40,6 +40,44 @@ const postProgress = (requestId: number, processed: number, total: number, stage
   self.postMessage(message);
 };
 
+const postTelemetry = (
+  requestId: number,
+  event: string,
+  details?: Record<string, number | string | boolean>,
+) => {
+  self.postMessage({
+    type: 'telemetry',
+    requestId,
+    event,
+    timestamp: Date.now(),
+    details: details || {},
+  });
+};
+
+const timed = async <T>(
+  requestId: number,
+  event: string,
+  fn: () => Promise<T>,
+  extraDetails?: Record<string, number | string | boolean>,
+): Promise<T> => {
+  const start = performance.now();
+  try {
+    const result = await fn();
+    const elapsedMs = Math.round(performance.now() - start);
+    postTelemetry(requestId, event, { elapsedMs, ok: true, ...(extraDetails || {}) });
+    return result;
+  } catch (err) {
+    const elapsedMs = Math.round(performance.now() - start);
+    postTelemetry(requestId, event, {
+      elapsedMs,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+      ...(extraDetails || {}),
+    });
+    throw err;
+  }
+};
+
 const rowStore = new DuckDbRowStore();
 let cachedStorageKey = '';
 let baseAnalytics: ReferralAnalytics | null = null;
@@ -874,14 +912,20 @@ const processCsvStreaming = async (
   users: Record<string, string>[] | null,
   ingestRoute: 'auto' | 'small' | 'large',
 ) => {
+  const ingestStart = performance.now();
+  postTelemetry(requestId, 'parse_start', {
+    parser: 'csv-stream',
+    fileSize: file.size,
+    fileName: file.name,
+  });
   postProgress(requestId, 0, file.size, 'Ingesting CSV into DuckDB...');
   await rowStore.open(storageKey);
   await rowStore.clear(storageKey);
   cachedStorageKey = storageKey;
   baseAnalytics = null;
 
-  await rowStore.ingestCsvFile(file, map);
-  await registerLookupTables({ sites, listings, users });
+  await timed(requestId, 'csv_ingest', () => rowStore.ingestCsvFile(file, map), { fileSize: file.size });
+  await timed(requestId, 'lookup_register', () => registerLookupTables({ sites, listings, users }));
   postProgress(requestId, Math.floor(file.size * 0.6), file.size, 'Normalizing data...');
 
   const table = rowStore.getTableName();
@@ -919,25 +963,31 @@ const processCsvStreaming = async (
   (rowStore as unknown as { rowCount: number }).rowCount = acceptedRows;
 
   postProgress(requestId, Math.floor(file.size * 0.8), file.size, 'Computing analytics...');
-  let analytics = await buildAnalyticsFromSql(table, '', true).catch(() => null);
+  let analytics = await timed(requestId, 'analytics_sql', () => buildAnalyticsFromSql(table, '', true), {
+    scope: 'ingest',
+  }).catch(() => null);
   if (!analytics) {
-    const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
-    for await (const batch of rowStore.streamRead(50000)) {
-      for (const row of batch) acc.add(row);
-    }
-    analytics = acc.finalize();
-    const sqlKpis = await computeSqlKpis(table, '').catch(() => null);
-    if (sqlKpis) {
-      analytics.total = sqlKpis.total;
-      analytics.distinctRefs = sqlKpis.distinctRefs;
-      analytics.uniqueSendingSites = sqlKpis.uniqueSendingSites;
-      analytics.uniqueTargetSites = sqlKpis.uniqueTargetSites;
-      analytics.uniqueSenders = sqlKpis.uniqueSenders;
-      analytics.uniqueProfIds = sqlKpis.uniqueProfIds;
-      analytics.uniqueTargetRefs = sqlKpis.uniqueTargetRefs;
-    }
-    const sqlAgg = await computeSqlAggregates(table, '').catch(() => null);
-    if (sqlAgg) applySqlAggregates(analytics, sqlAgg);
+    postTelemetry(requestId, 'analytics_fallback', { path: 'js-accumulator' });
+    analytics = await timed(requestId, 'analytics_js', async () => {
+      const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
+      for await (const batch of rowStore.streamRead(50000)) {
+        for (const row of batch) acc.add(row);
+      }
+      const a = acc.finalize();
+      const sqlKpis = await computeSqlKpis(table, '').catch(() => null);
+      if (sqlKpis) {
+        a.total = sqlKpis.total;
+        a.distinctRefs = sqlKpis.distinctRefs;
+        a.uniqueSendingSites = sqlKpis.uniqueSendingSites;
+        a.uniqueTargetSites = sqlKpis.uniqueTargetSites;
+        a.uniqueSenders = sqlKpis.uniqueSenders;
+        a.uniqueProfIds = sqlKpis.uniqueProfIds;
+        a.uniqueTargetRefs = sqlKpis.uniqueTargetRefs;
+      }
+      const sqlAgg = await computeSqlAggregates(table, '').catch(() => null);
+      if (sqlAgg) applySqlAggregates(a, sqlAgg);
+      return a;
+    });
   }
   baseAnalytics = analytics;
 
@@ -952,6 +1002,16 @@ const processCsvStreaming = async (
   }));
 
   postProgress(requestId, file.size, file.size, 'Completed');
+  postTelemetry(requestId, 'parse_complete', {
+    parser: 'csv-stream',
+    acceptedRows,
+    missingRequiredRows,
+    invalidDateRows,
+    totalElapsedMs: Math.round(performance.now() - ingestStart),
+    rowsPerSec: acceptedRows > 0
+      ? Math.round(acceptedRows / Math.max(0.001, (performance.now() - ingestStart) / 1000))
+      : 0,
+  });
   self.postMessage({
     type: 'complete',
     requestId,
@@ -991,6 +1051,8 @@ const processXlsxSmall = async (
   users: Record<string, string>[] | null,
   ingestRoute: 'auto' | 'small' | 'large',
 ) => {
+  const ingestStart = performance.now();
+  postTelemetry(requestId, 'parse_start', { parser: 'xlsx-worker', fileSize, fileName });
   await rowStore.open(storageKey);
   await rowStore.clear(storageKey);
   cachedStorageKey = storageKey;
@@ -1027,15 +1089,28 @@ const processXlsxSmall = async (
   await registerLookupTables({ sites, listings, users });
 
   postProgress(requestId, 90, 100, 'Computing analytics...');
-  let analytics = await buildAnalyticsFromSql(rowStore.getTableName(), '', true).catch(() => null);
+  let analytics = await timed(requestId, 'analytics_sql', () => buildAnalyticsFromSql(rowStore.getTableName(), '', true), {
+    scope: 'ingest-xlsx',
+  }).catch(() => null);
   if (!analytics) {
-    const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
-    for (const row of mapped) acc.add(row);
-    analytics = acc.finalize();
+    postTelemetry(requestId, 'analytics_fallback', { path: 'js-accumulator' });
+    analytics = await timed(requestId, 'analytics_js', async () => {
+      const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
+      for (const row of mapped) acc.add(row);
+      return acc.finalize();
+    });
   }
   baseAnalytics = analytics;
 
   postProgress(requestId, 100, 100, 'Completed');
+  postTelemetry(requestId, 'parse_complete', {
+    parser: 'xlsx-worker',
+    acceptedRows: rowStore.getRowCount(),
+    totalElapsedMs: Math.round(performance.now() - ingestStart),
+    rowsPerSec: rowStore.getRowCount() > 0
+      ? Math.round(rowStore.getRowCount() / Math.max(0.001, (performance.now() - ingestStart) / 1000))
+      : 0,
+  });
   self.postMessage({
     type: 'complete',
     requestId,
@@ -1074,8 +1149,20 @@ const filterFromStore = async (
 ) => {
   const ctx: Ctx = { sites, listings, users };
   const noFilter = noFilters(includeTest, regionRefs, initialTargetRefs, raNames);
+  const recomputeStart = performance.now();
+  postTelemetry(requestId, 'recompute_start', {
+    includeTest,
+    regionCount: regionRefs.length,
+    initialTargetCount: initialTargetRefs?.length || 0,
+    raNameCount: raNames?.length || 0,
+    noFilter,
+  });
 
   if (noFilter && baseAnalytics && cachedStorageKey === storageKey) {
+    postTelemetry(requestId, 'recompute_complete', {
+      path: 'cached-base',
+      totalElapsedMs: Math.round(performance.now() - recomputeStart),
+    });
     self.postMessage({ type: 'filtered', requestId, analytics: baseAnalytics });
     return;
   }
@@ -1103,8 +1190,9 @@ const filterFromStore = async (
   }
 
   const whereClause = clauses.join(' AND ');
-  let analytics = await buildAnalyticsFromSql(rowStore.getTableName(), whereClause, false).catch(() => null);
+  let analytics = await timed(requestId, 'recompute_sql', () => buildAnalyticsFromSql(rowStore.getTableName(), whereClause, false)).catch(() => null);
   if (!analytics) {
+    postTelemetry(requestId, 'recompute_fallback', { path: 'js-accumulator' });
     const acc = new ReferralAnalyticsAccumulator(ctx);
     const iterator = await rowStore.streamReadFiltered(50000, whereClause);
     for await (const batch of iterator) {
@@ -1128,6 +1216,11 @@ const filterFromStore = async (
     analytics.distinctInitialTargetRefs = baseAnalytics.distinctInitialTargetRefs;
   }
   if (noFilter) baseAnalytics = analytics;
+  postTelemetry(requestId, 'recompute_complete', {
+    path: 'sql',
+    total: analytics.total,
+    totalElapsedMs: Math.round(performance.now() - recomputeStart),
+  });
   self.postMessage({ type: 'filtered', requestId, analytics });
 };
 

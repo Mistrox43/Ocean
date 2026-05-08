@@ -34,10 +34,19 @@ export type IngestMetadata = {
   paritySignature?: string;
 };
 
+export type TelemetryEvent = {
+  type: 'telemetry';
+  requestId: number;
+  event: string;
+  timestamp: number;
+  details: Record<string, number | string | boolean>;
+};
+
 type WorkerMessage =
   | { type: 'progress'; requestId: number; processed: number; total: number; pct: number; stage: string }
   | { type: 'complete'; requestId: number; headerDiag: HeaderDiag[]; metadata: IngestMetadata; analytics: ReferralAnalytics | null }
   | { type: 'filtered'; requestId: number; analytics: ReferralAnalytics | null }
+  | TelemetryEvent
   | { type: 'error'; requestId: number; error: string };
 
 export function useFileParser() {
@@ -51,6 +60,7 @@ export function useFileParser() {
   const [analytics, setAnalytics] = useState<ReferralAnalytics | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [telemetry, setTelemetry] = useState<TelemetryEvent[]>([]);
 
   const destroyWorker = useCallback(() => {
     if (workerRef.current) workerRef.current.terminate();
@@ -68,6 +78,7 @@ export function useFileParser() {
     setAnalytics(null);
     setError(null);
     setIsLoading(false);
+    setTelemetry([]);
   }, [destroyWorker]);
 
   const ingest = useCallback(async (
@@ -106,6 +117,13 @@ export function useFileParser() {
 
       worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
         const msg = event.data;
+        if (msg.type === 'telemetry') {
+          setTelemetry(prev => (prev.length >= 500 ? [...prev.slice(-499), msg] : [...prev, msg]));
+          if (typeof console !== 'undefined') {
+            console.debug('[worker telemetry]', msg.event, msg.details);
+          }
+          return;
+        }
         if (msg.type === 'progress') {
           if (msg.requestId !== ingestRequestIdRef.current) return;
           setProgress({ processed: msg.processed, total: msg.total, pct: msg.pct, stage: msg.stage });
@@ -173,5 +191,5 @@ export function useFileParser() {
     destroyWorker();
   }, [destroyWorker]);
 
-  return { ingest, recomputeFromStore, progress, metadata, headerDiag, analytics, error, isLoading, reset };
+  return { ingest, recomputeFromStore, progress, metadata, headerDiag, analytics, error, isLoading, reset, telemetry };
 }
