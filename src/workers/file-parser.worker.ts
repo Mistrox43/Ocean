@@ -160,6 +160,9 @@ type SqlAggregates = {
   byEmrRecv: { label: string; value: number }[];
   fhirCount: number;
   earliestDate: string;
+  byTarget: import('@/types').TargetSiteRow[] | null;
+  bySource: import('@/types').SourceSiteRow[] | null;
+  bySender: import('@/types').SenderRow[] | null;
 };
 
 function topNEntries(entries: [string, number][]): { label: string; value: number }[] {
@@ -371,6 +374,313 @@ async function computeSqlAggregates(tableName: string, whereClause: string): Pro
     }
   }
 
+  const siteNormExprCol = (col: string) =>
+    `CAST(TRY_CAST(regexp_replace(COALESCE(${col}, ''), '\\.0+$', '') AS INTEGER) AS VARCHAR)`;
+
+  const siteMetaColsRes = await conn.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema='main' AND table_name='lookup_sites'`,
+  );
+  const siteMetaCols = new Set(
+    siteMetaColsRes.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string } }).toJSON().column_name),
+  );
+  const siteNameJoinable = siteMetaCols.has('siteNumber') && siteMetaCols.has('siteName');
+
+  const listingMetaColsRes = await conn.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema='main' AND table_name='lookup_listings'`,
+  );
+  const listingMetaCols = new Set(
+    listingMetaColsRes.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string } }).toJSON().column_name),
+  );
+  const listingTitleJoinable = listingMetaCols.has('ref') && listingMetaCols.has('title');
+
+  const userMetaColsRes = await conn.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema='main' AND table_name='lookup_users'`,
+  );
+  const userMetaCols = new Set(
+    userMetaColsRes.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string } }).toJSON().column_name),
+  );
+  const userNameJoinable = userMetaCols.has('userName');
+
+  let byTarget: import('@/types').TargetSiteRow[] | null = null;
+  if (cols.has('siteNum')) {
+    const senderExpr = cols.has('referredByUserName')
+      ? `COUNT(DISTINCT NULLIF(r.${ident('referredByUserName')}, ''))::BIGINT`
+      : `0::BIGINT`;
+    const stateExpr = cols.has('referralState')
+      ? `map_from_entries(list_zip(list(DISTINCT COALESCE(NULLIF(r.${ident('referralState')}, ''), 'UNKNOWN')), [0]))`
+      : `MAP()`;
+    const sn = siteNormExprCol(`r.${ident('siteNum')}`);
+    const joinS = siteNameJoinable
+      ? `LEFT JOIN ${ident('lookup_sites')} s ON ${siteNormExprCol(`s.${ident('siteNumber')}`)} = ${sn}`
+      : '';
+    const tgtSql = `
+      SELECT ${sn} AS siteNum,
+             ${siteNameJoinable ? `ANY_VALUE(s.${ident('siteName')})` : `ANY_VALUE(${cols.has('recipientName') ? `r.${ident('recipientName')}` : sn})`} AS siteName,
+             COUNT(*)::BIGINT AS totalRefs,
+             ${senderExpr} AS uniqueSenders
+      FROM ${ident(tableName)} r ${joinS}
+      ${where}
+      GROUP BY siteNum
+      ORDER BY totalRefs DESC
+    `;
+    const tgtRes = await conn.query(tgtSql);
+    const baseRows = tgtRes.toArray().map((r: unknown) => (r as { toJSON: () => Record<string, unknown> }).toJSON());
+
+    let statesMap: Map<string, Record<string, number>> = new Map();
+    if (cols.has('referralState')) {
+      const stSql = `
+        SELECT ${sn} AS siteNum,
+               COALESCE(NULLIF(r.${ident('referralState')}, ''), 'UNKNOWN') AS state,
+               COUNT(*)::BIGINT AS n
+        FROM ${ident(tableName)} r
+        ${where}
+        GROUP BY siteNum, state
+      `;
+      const stRes = await conn.query(stSql);
+      for (const row of stRes.toArray()) {
+        const j = (row as { toJSON: () => { siteNum: string; state: string; n: number } }).toJSON();
+        const k = String(j.siteNum ?? '');
+        if (!statesMap.has(k)) statesMap.set(k, {});
+        statesMap.get(k)![String(j.state ?? 'UNKNOWN')] = Number(j.n || 0);
+      }
+      // unused variable guard
+      void stateExpr;
+    }
+
+    let listingsMap: Map<string, { ref: string; title: string; count: number }[]> = new Map();
+    if (cols.has('referralTargetRef')) {
+      const titleExpr = listingTitleJoinable
+        ? `COALESCE(NULLIF(l.${ident('title')}, ''), ${cols.has('recipientName') ? `NULLIF(MIN(r.${ident('recipientName')}), ''),` : ''} r.${ident('referralTargetRef')})`
+        : cols.has('recipientName')
+          ? `COALESCE(NULLIF(MIN(r.${ident('recipientName')}), ''), r.${ident('referralTargetRef')})`
+          : `r.${ident('referralTargetRef')}`;
+      const joinL = listingTitleJoinable
+        ? `LEFT JOIN ${ident('lookup_listings')} l ON l.${ident('ref')} = r.${ident('referralTargetRef')}`
+        : '';
+      const lSql = `
+        SELECT ${sn} AS siteNum,
+               r.${ident('referralTargetRef')} AS ref,
+               ${titleExpr} AS title,
+               COUNT(*)::BIGINT AS n
+        FROM ${ident(tableName)} r ${joinL}
+        ${where}${where ? ' AND ' : 'WHERE '}NULLIF(r.${ident('referralTargetRef')}, '') IS NOT NULL
+        GROUP BY siteNum, r.${ident('referralTargetRef')}${listingTitleJoinable ? `, l.${ident('title')}` : ''}
+      `;
+      const lRes = await conn.query(lSql);
+      for (const row of lRes.toArray()) {
+        const j = (row as { toJSON: () => { siteNum: string; ref: string; title: string; n: number } }).toJSON();
+        const k = String(j.siteNum ?? '');
+        if (!listingsMap.has(k)) listingsMap.set(k, []);
+        listingsMap.get(k)!.push({ ref: String(j.ref ?? ''), title: String(j.title ?? j.ref ?? ''), count: Number(j.n || 0) });
+      }
+      for (const arr of listingsMap.values()) arr.sort((a, b) => b.count - a.count);
+    }
+
+    byTarget = baseRows.map(row => {
+      const siteNum = String(row.siteNum ?? '');
+      return {
+        siteNum,
+        siteName: String(row.siteName ?? siteNum),
+        totalRefs: Number(row.totalRefs || 0),
+        uniqueSenders: Number(row.uniqueSenders || 0),
+        states: statesMap.get(siteNum) || {},
+        listings: listingsMap.get(siteNum) || [],
+      };
+    });
+  }
+
+  let bySource: import('@/types').SourceSiteRow[] | null = null;
+  if (cols.has('srcsiteNum')) {
+    const sn = siteNormExprCol(`r.${ident('srcsiteNum')}`);
+    const joinS = siteNameJoinable
+      ? `LEFT JOIN ${ident('lookup_sites')} s ON ${siteNormExprCol(`s.${ident('siteNumber')}`)} = ${sn}`
+      : '';
+    const nameExpr = siteNameJoinable
+      ? `ANY_VALUE(s.${ident('siteName')})`
+      : cols.has('srcSiteName')
+        ? `ANY_VALUE(r.${ident('srcSiteName')})`
+        : `ANY_VALUE(${sn})`;
+    const targetExpr = cols.has('siteNum')
+      ? `COUNT(DISTINCT ${siteNormExprCol(`r.${ident('siteNum')}`)})::BIGINT`
+      : `0::BIGINT`;
+    const userExpr = cols.has('referredByUserName')
+      ? `COUNT(DISTINCT NULLIF(r.${ident('referredByUserName')}, ''))::BIGINT`
+      : `0::BIGINT`;
+    const sSql = `
+      SELECT ${sn} AS siteNum,
+             ${nameExpr} AS siteName,
+             COUNT(*)::BIGINT AS totalRefs,
+             ${targetExpr} AS uniqueTargets,
+             ${userExpr} AS uniqueUsers
+      FROM ${ident(tableName)} r ${joinS}
+      ${where}${where ? ' AND ' : 'WHERE '}NULLIF(r.${ident('srcsiteNum')}, '') IS NOT NULL
+      GROUP BY siteNum
+      ORDER BY totalRefs DESC
+    `;
+    const sRes = await conn.query(sSql);
+    bySource = sRes.toArray().map(r => {
+      const j = (r as { toJSON: () => Record<string, unknown> }).toJSON();
+      const siteNum = String(j.siteNum ?? '');
+      return {
+        siteNum,
+        siteName: String(j.siteName ?? siteNum),
+        totalRefs: Number(j.totalRefs || 0),
+        uniqueTargets: Number(j.uniqueTargets || 0),
+        uniqueUsers: Number(j.uniqueUsers || 0),
+      };
+    });
+  }
+
+  let bySender: import('@/types').SenderRow[] | null = null;
+  if (cols.has('referredByUserName')) {
+    const userNameExpr = `r.${ident('referredByUserName')}`;
+    const fullNameExpr = cols.has('referredByUserFullName')
+      ? `ANY_VALUE(NULLIF(r.${ident('referredByUserFullName')}, ''))`
+      : userNameJoinable && userMetaCols.has('name')
+        ? `ANY_VALUE(u.${ident('name')})`
+        : `ANY_VALUE(${userNameExpr})`;
+    const clinTypeExpr = cols.has('referrerClinicianType')
+      ? `ANY_VALUE(NULLIF(r.${ident('referrerClinicianType')}, ''))`
+      : userNameJoinable && userMetaCols.has('clinicianType')
+        ? `ANY_VALUE(u.${ident('clinicianType')})`
+        : `''`;
+    const profExpr = cols.has('referrerProfessionalId')
+      ? `ANY_VALUE(NULLIF(r.${ident('referrerProfessionalId')}, ''))`
+      : `''`;
+    const tgtRefExpr = cols.has('siteNum')
+      ? `COUNT(DISTINCT ${siteNormExprCol(`r.${ident('siteNum')}`)})::BIGINT`
+      : `0::BIGINT`;
+    const listingExpr = cols.has('referralTargetRef')
+      ? `COUNT(DISTINCT NULLIF(r.${ident('referralTargetRef')}, ''))::BIGINT`
+      : `0::BIGINT`;
+    const joinU = userNameJoinable
+      ? `LEFT JOIN ${ident('lookup_users')} u ON u.${ident('userName')} = r.${ident('referredByUserName')}`
+      : '';
+    const senderSql = `
+      SELECT ${userNameExpr} AS userName,
+             ${fullNameExpr} AS fullName,
+             ${clinTypeExpr} AS clinicianType,
+             ${profExpr} AS profId,
+             COUNT(*)::BIGINT AS totalRefs,
+             ${tgtRefExpr} AS uniqueTargets,
+             ${listingExpr} AS uniqueListings
+      FROM ${ident(tableName)} r ${joinU}
+      ${where}${where ? ' AND ' : 'WHERE '}NULLIF(r.${ident('referredByUserName')}, '') IS NOT NULL
+      GROUP BY userName
+      ORDER BY totalRefs DESC
+    `;
+    const senderRes = await conn.query(senderSql);
+    const senderBase = senderRes.toArray().map(r => {
+      const j = (r as { toJSON: () => Record<string, unknown> }).toJSON();
+      return {
+        userName: String(j.userName ?? ''),
+        fullName: String(j.fullName ?? j.userName ?? ''),
+        clinicianType: String(j.clinicianType ?? ''),
+        profId: String(j.profId ?? ''),
+        totalRefs: Number(j.totalRefs || 0),
+        uniqueTargets: Number(j.uniqueTargets || 0),
+        uniqueListings: Number(j.uniqueListings || 0),
+      };
+    });
+
+    let srcSitesMap: Map<string, { siteNum: string; siteName: string; count: number }[]> = new Map();
+    if (cols.has('srcsiteNum')) {
+      const sn = siteNormExprCol(`r.${ident('srcsiteNum')}`);
+      const nameExpr = siteNameJoinable
+        ? `ANY_VALUE(s.${ident('siteName')})`
+        : cols.has('srcSiteName')
+          ? `ANY_VALUE(r.${ident('srcSiteName')})`
+          : `ANY_VALUE(${sn})`;
+      const joinS2 = siteNameJoinable
+        ? `LEFT JOIN ${ident('lookup_sites')} s ON ${siteNormExprCol(`s.${ident('siteNumber')}`)} = ${sn}`
+        : '';
+      const srcSitesSql = `
+        SELECT ${userNameExpr} AS userName, ${sn} AS siteNum, ${nameExpr} AS siteName, COUNT(*)::BIGINT AS n
+        FROM ${ident(tableName)} r ${joinS2}
+        ${where}${where ? ' AND ' : 'WHERE '}NULLIF(r.${ident('referredByUserName')}, '') IS NOT NULL AND NULLIF(r.${ident('srcsiteNum')}, '') IS NOT NULL
+        GROUP BY userName, siteNum
+      `;
+      const srcRes = await conn.query(srcSitesSql);
+      for (const row of srcRes.toArray()) {
+        const j = (row as { toJSON: () => Record<string, unknown> }).toJSON();
+        const u = String(j.userName ?? '');
+        if (!srcSitesMap.has(u)) srcSitesMap.set(u, []);
+        srcSitesMap.get(u)!.push({
+          siteNum: String(j.siteNum ?? ''),
+          siteName: String(j.siteName ?? j.siteNum ?? ''),
+          count: Number(j.n || 0),
+        });
+      }
+      for (const arr of srcSitesMap.values()) arr.sort((a, b) => b.count - a.count);
+    }
+
+    const senderRows: import('@/types').SenderRow[] = senderBase.map(b => ({
+      userName: b.userName,
+      fullName: b.fullName,
+      clinicianType: b.clinicianType,
+      profId: b.profId,
+      totalRefs: b.totalRefs,
+      uniqueTargets: b.uniqueTargets,
+      uniqueListings: b.uniqueListings,
+      isUnknown: false,
+      srcSites: srcSitesMap.get(b.userName) || [],
+    }));
+
+    const unknownSql = `
+      SELECT COUNT(*)::BIGINT AS total,
+             ${cols.has('siteNum') ? `COUNT(DISTINCT ${siteNormExprCol(`r.${ident('siteNum')}`)})::BIGINT` : `0::BIGINT`} AS uniqueTargets,
+             ${cols.has('referralTargetRef') ? `COUNT(DISTINCT NULLIF(r.${ident('referralTargetRef')}, ''))::BIGINT` : `0::BIGINT`} AS uniqueListings
+      FROM ${ident(tableName)} r
+      ${where}${where ? ' AND ' : 'WHERE '}NULLIF(r.${ident('referredByUserName')}, '') IS NULL
+    `;
+    const uRes = await conn.query(unknownSql);
+    const uRow = uRes.toArray()[0] as { toJSON: () => Record<string, unknown> } | undefined;
+    const unknownTotal = uRow ? Number(uRow.toJSON().total || 0) : 0;
+    if (unknownTotal > 0) {
+      let unknownSrcSites: { siteNum: string; siteName: string; count: number }[] = [];
+      if (cols.has('srcsiteNum')) {
+        const sn = siteNormExprCol(`r.${ident('srcsiteNum')}`);
+        const nameExpr = siteNameJoinable
+          ? `ANY_VALUE(s.${ident('siteName')})`
+          : cols.has('srcSiteName')
+            ? `ANY_VALUE(r.${ident('srcSiteName')})`
+            : `ANY_VALUE(${sn})`;
+        const joinS2 = siteNameJoinable
+          ? `LEFT JOIN ${ident('lookup_sites')} s ON ${siteNormExprCol(`s.${ident('siteNumber')}`)} = ${sn}`
+          : '';
+        const uSrcSql = `
+          SELECT ${sn} AS siteNum, ${nameExpr} AS siteName, COUNT(*)::BIGINT AS n
+          FROM ${ident(tableName)} r ${joinS2}
+          ${where}${where ? ' AND ' : 'WHERE '}NULLIF(r.${ident('referredByUserName')}, '') IS NULL AND NULLIF(r.${ident('srcsiteNum')}, '') IS NOT NULL
+          GROUP BY siteNum
+          ORDER BY n DESC
+        `;
+        const uSrcRes = await conn.query(uSrcSql);
+        unknownSrcSites = uSrcRes.toArray().map(r => {
+          const j = (r as { toJSON: () => Record<string, unknown> }).toJSON();
+          return {
+            siteNum: String(j.siteNum ?? ''),
+            siteName: String(j.siteName ?? j.siteNum ?? ''),
+            count: Number(j.n || 0),
+          };
+        });
+      }
+      const uJson = uRow!.toJSON();
+      senderRows.unshift({
+        userName: '',
+        fullName: '(Unknown sender)',
+        clinicianType: '',
+        profId: '',
+        totalRefs: unknownTotal,
+        uniqueTargets: Number(uJson.uniqueTargets || 0),
+        uniqueListings: Number(uJson.uniqueListings || 0),
+        isUnknown: true,
+        srcSites: unknownSrcSites,
+      });
+    }
+    bySender = senderRows;
+  }
+
   let fhirCount = 0;
   if (cols.has('referralSource')) {
     const res = await conn.query(
@@ -393,6 +703,9 @@ async function computeSqlAggregates(tableName: string, whereClause: string): Pro
     byEmrRecv,
     fhirCount,
     earliestDate,
+    byTarget,
+    bySource,
+    bySender,
   };
 }
 
@@ -445,6 +758,9 @@ function applySqlAggregates(analytics: ReferralAnalytics, agg: SqlAggregates): v
   analytics.fhirCount = agg.fhirCount;
   analytics.fhirPct = analytics.total === 0 ? 0 : Math.round((agg.fhirCount / analytics.total) * 1000) / 10;
   if (agg.earliestDate) analytics.earliestDate = agg.earliestDate;
+  if (agg.byTarget) analytics.byTarget = agg.byTarget;
+  if (agg.bySource) analytics.bySource = agg.bySource;
+  if (agg.bySender) analytics.bySender = agg.bySender;
 }
 
 const noFilters = (includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined) =>
