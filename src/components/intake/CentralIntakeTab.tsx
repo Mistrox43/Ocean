@@ -92,17 +92,20 @@ export function CentralIntakeTab({ intake, loadedAtLabel }: CentralIntakeTabProp
     { label: 'INCOMPLETE', value: view.incompleteCount, color: COLORS.red },
   ];
 
-  const prefSegments = useMemo(
-    () =>
-      Object.entries(view.patientPref)
-        .sort((a, b) => b[1] - a[1])
-        .map(([label, value], i) => ({
-          label,
-          value,
-          color: [COLORS.purple, COLORS.accent, COLORS.amber, COLORS.green, COLORS.blue][i % 5],
-        })),
-    [view.patientPref],
-  );
+  const prefSegments = useMemo(() => {
+    const shortLabel: Record<string, string> = {
+      'Specific Surgeon': 'Specific Surgeon',
+      'First Available Surgeon': 'First Available',
+      'Surgeon Closest to Patient Home': 'Closest to Home',
+    };
+    return Object.entries(view.patientPref)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, value], i) => ({
+        label: shortLabel[label] || label,
+        value,
+        color: [COLORS.purple, COLORS.accent, COLORS.amber, COLORS.green, COLORS.blue][i % 5],
+      }));
+  }, [view.patientPref]);
 
   const wait1GaugeMax = useMemo(() => {
     const m = view.p90Wait1 ?? view.avgWait1 ?? 0;
@@ -198,57 +201,34 @@ export function CentralIntakeTab({ intake, loadedAtLabel }: CentralIntakeTabProp
         />
       </div>
 
-      {/* Chart row */}
+      {/* Chart row — donuts get 2 cols each, gauges 1 col each, on a 6-col grid */}
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(4, 1fr)',
-          gap: 14,
+          gridTemplateColumns: '2fr 2fr 1fr 1fr',
+          gap: 16,
           marginBottom: 14,
         }}
       >
         {completeVisible && (
-          <ChartCard title="Referrals Received Complete">
-            <div style={{ position: 'relative', flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <Donut size={150} segments={completeSegments} />
-              <div
-                style={{
-                  position: 'absolute',
-                  left: 0,
-                  top: 0,
-                  width: 150,
-                  height: 150,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  pointerEvents: 'none',
-                }}
-              >
-                <div style={{ fontSize: 22, fontWeight: 700, color: COLORS.green }}>
-                  {fmtPct(completePct)}
-                </div>
-                <div style={{ fontSize: 10, color: COLORS.dimmed, marginTop: 2 }}>
-                  {formatNumber(completeTotal)} total
-                </div>
-              </div>
-            </div>
-          </ChartCard>
+          <ChartBox title="Referrals Received Complete" subtitle={`${fmtPct(completePct)} complete · ${formatNumber(completeTotal)} total`}>
+            <Donut size={140} segments={completeSegments} />
+          </ChartBox>
         )}
         {preferenceVisible && (
-          <ChartCard title="Patient Preference">
-            <Donut size={150} segments={prefSegments} />
-          </ChartCard>
+          <ChartBox title="Patient Preference">
+            <Donut size={140} segments={prefSegments} />
+          </ChartBox>
         )}
         {wait1Visible && (
-          <ChartCard title="Wait 1">
+          <ChartBox title="Wait 1">
             <Gauge value={view.avgWait1} max={wait1GaugeMax} label="Avg" unit="days" />
-          </ChartCard>
+          </ChartBox>
         )}
         {wait2Visible && (
-          <ChartCard title="Wait 2">
+          <ChartBox title="Wait 2">
             <Gauge value={view.avgWait2} max={wait2GaugeMax} label="Avg" unit="days" />
-          </ChartCard>
+          </ChartBox>
         )}
       </div>
 
@@ -453,24 +433,21 @@ function FilterCell({ label, value, options, onChange, formatLabel, disabled }: 
   );
 }
 
-function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+function ChartBox({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
   return (
     <div
       style={{
         background: COLORS.card,
         border: '1px solid ' + COLORS.border,
         borderRadius: 12,
-        padding: 18,
-        height: 250,
-        display: 'flex',
-        flexDirection: 'column',
-        minHeight: 0,
+        padding: 24,
+        minWidth: 0,
+        overflow: 'hidden',
       }}
     >
-      <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, marginBottom: 8 }}>{title}</div>
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 0 }}>
-        {children}
-      </div>
+      <h3 style={{ fontSize: 14, fontWeight: 700, marginBottom: subtitle ? 2 : 12, marginTop: 0 }}>{title}</h3>
+      {subtitle && <p style={{ fontSize: 11, color: COLORS.dimmed, marginBottom: 12, marginTop: 0 }}>{subtitle}</p>}
+      {children}
     </div>
   );
 }
