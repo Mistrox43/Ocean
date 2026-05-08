@@ -42,9 +42,9 @@ export class DuckDbRowStore {
 
     const conn = await getConn();
     const descTable = await conn.query(
-      `SELECT column_name, data_type FROM (DESCRIBE SELECT * FROM read_csv_auto(${sqlLit(fileName)}, header=true, sample_size=5000))`
+      `SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_csv_auto(${sqlLit(fileName)}, header=true, sample_size=5000))`
     );
-    const descRows = descTable.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string; data_type: string } }).toJSON());
+    const descRows = descTable.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string; column_type: string } }).toJSON());
     const rawHeaders = descRows.map(r => r.column_name);
 
     const mapHeader = (h: string) => headerMap[h] || headerMap[h.toLowerCase()] || h;
