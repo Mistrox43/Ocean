@@ -111,6 +111,28 @@ export const REFERRAL_MAP: Record<string, string> = {
   initialhealthservice: 'initialHealthService', initialHealthService: 'initialHealthService',
   externalserviceid: 'externalServiceId', externalServiceId: 'externalServiceId',
   raname: 'raName', raName: 'raName', 'ra name': 'raName', 'RA Name': 'raName',
+  // Central Intake tab fields ────────────────────────────────────────────────
+  patientid: 'patientId', patientId: 'patientId',
+  'patient id': 'patientId', 'Patient ID': 'patientId',
+  scheduledappointment: 'scheduledAppointment', scheduledAppointment: 'scheduledAppointment',
+  'scheduled appointment': 'scheduledAppointment',
+  scheduledappointment2: 'scheduledAppointment2', scheduledAppointment2: 'scheduledAppointment2',
+  'scheduled appointment 2': 'scheduledAppointment2',
+  wait1days: 'wait1Days', wait1Days: 'wait1Days', 'wait 1 days': 'wait1Days',
+  wait2days: 'wait2Days', wait2Days: 'wait2Days', 'wait 2 days': 'wait2Days',
+  daysuntilreferralresponse: 'daysUntilReferralResponse',
+  daysUntilReferralResponse: 'daysUntilReferralResponse',
+  'days until referral response': 'daysUntilReferralResponse',
+  referraldeleted: 'referralDeleted', referralDeleted: 'referralDeleted',
+  'referral deleted': 'referralDeleted',
+  ax_patientpreference: 'patientPreference', ax_patientPreference: 'patientPreference',
+  patientpreference: 'patientPreference', patientPreference: 'patientPreference',
+  'patient preference': 'patientPreference',
+  ax_receivedreferralcomplete: 'receivedReferralComplete',
+  ax_receivedReferralComplete: 'receivedReferralComplete',
+  receivedreferralcomplete: 'receivedReferralComplete',
+  receivedReferralComplete: 'receivedReferralComplete',
+  'received referral complete': 'receivedReferralComplete',
 };
 
 // ── Diagnostic field sets ───────────────────────────────────────────────────
@@ -148,6 +170,9 @@ export const USED_FIELDS: Record<string, Set<string>> = {
     'referrerCity', 'referrerProvince', 'recipientProvince',
     'referrerProfessionalId', 'currentHealthService', 'initialHealthService',
     'externalServiceId', 'raName',
+    'patientId', 'scheduledAppointment', 'scheduledAppointment2',
+    'wait1Days', 'wait2Days', 'daysUntilReferralResponse',
+    'referralDeleted', 'patientPreference', 'receivedReferralComplete',
   ]),
 };
 

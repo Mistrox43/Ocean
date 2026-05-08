@@ -272,3 +272,113 @@ export interface ReferralAnalytics {
   byEmrSent: LabelValue[];
   byEmrRecv: LabelValue[];
 }
+
+// ── Central Intake Analytics ─────────────────────────────────────────────────
+
+export interface IntakeRecipientBucket {
+  count: number;
+  wait1Days: number[];
+  wait2Days: number[];
+}
+
+export interface IntakeSentTypeBucket {
+  count: number;
+  referrers: string[];
+}
+
+export interface IntakeMonthBucket {
+  month: string;
+  fiscalYear: string;
+  quarter: string;
+  isoWeeks: string[];
+  total: number;
+  patientIds: string[];
+  wait1Days: number[];
+  wait2Days: number[];
+  cycleDays: number[];
+  completeCount: number;
+  incompleteCount: number;
+  patientPref: Record<string, number>;
+  byRecipient: Record<string, IntakeRecipientBucket>;
+  byReferrer: Record<string, number>;
+  bySentType: Record<string, IntakeSentTypeBucket>;
+}
+
+export interface IntakeWeekIndex {
+  count: number;
+  month: string;
+}
+
+export interface IntakeFieldPresence {
+  patientId: boolean;
+  wait1: boolean;
+  wait2: boolean;
+  cycle: boolean;
+  preference: boolean;
+  complete: boolean;
+  referrer: boolean;
+  source: boolean;
+  recipient: boolean;
+}
+
+export interface IntakeAnalytics {
+  earliestDate: string;
+  latestDate: string;
+  fiscalYears: string[];
+  quartersByFy: Record<string, string[]>;
+  monthsByQuarter: Record<string, string[]>;
+  weeksByMonth: Record<string, string[]>;
+  byMonth: Record<string, IntakeMonthBucket>;
+  byWeek: Record<string, IntakeWeekIndex>;
+  totalProcessed: number;
+  uniquePatientCount: number;
+  completeCount: number;
+  incompleteCount: number;
+  cycleSum: number;
+  cycleCount: number;
+  wait1Count: number;
+  wait2Count: number;
+  presence: IntakeFieldPresence;
+}
+
+export interface IntakeRecipientStat {
+  recipientName: string;
+  count: number;
+  avgWait1: number | null;
+  p90Wait1: number | null;
+  avgWait2: number | null;
+  p90Wait2: number | null;
+}
+
+export interface IntakeReferrerRow {
+  name: string;
+  count: number;
+  display: string;
+}
+
+export interface IntakeMethodRow {
+  method: string;
+  count: number;
+  pct: number;
+  referrerCount: number;
+}
+
+export interface IntakeView {
+  totalProcessed: number;
+  uniquePatients: number | null;
+  avgCycleDays: number | null;
+  wait1Count: number;
+  wait2Count: number;
+  avgWait1: number | null;
+  p90Wait1: number | null;
+  avgWait2: number | null;
+  p90Wait2: number | null;
+  completeCount: number;
+  incompleteCount: number;
+  patientPref: Record<string, number>;
+  recipientStats: IntakeRecipientStat[];
+  volumeByMonth: { label: string; value: number }[];
+  methodBySender: IntakeMethodRow[];
+  currentLocation: { recipientName: string; count: number }[];
+  referrerCounts: IntakeReferrerRow[];
+}

@@ -1,6 +1,6 @@
 /// <reference lib="webworker" />
 import * as XLSX from 'xlsx';
-import type { HeaderDiag, ReferralAnalytics } from '@/types';
+import type { HeaderDiag, IntakeAnalytics, ReferralAnalytics } from '@/types';
 import { createRowStore, type RowStore } from '@/storage/rowStore';
 import { ReferralAnalyticsAccumulator } from '@/lib/referralAnalyticsAccumulator';
 import { formatDate } from '@/utils';
@@ -47,6 +47,7 @@ const getStore = async () => {
 
 let cachedStorageKey = '';
 let baseAnalytics: ReferralAnalytics | null = null;
+let baseIntakeAnalytics: IntakeAnalytics | null = null;
 
 const noFilters = (includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined) =>
   includeTest && regionRefs.length === 0 && (!initialTargetRefs || !initialTargetRefs.length) && (!raNames || !raNames.length);
@@ -57,6 +58,7 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
   await store.clear(storageKey);
   cachedStorageKey = storageKey;
   baseAnalytics = null;
+  baseIntakeAnalytics = null;
   const reader = file.stream().getReader();
   const decoder = new TextDecoder();
   let carry = '';
@@ -197,14 +199,16 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
     sample: normalize(firstDataRow?.[i] ?? '').slice(0, 60),
   }));
 
-  const analytics = acc.finalize();
+  const { referral: analytics, intake: intakeAnalytics } = acc.finalize();
   baseAnalytics = analytics;
+  baseIntakeAnalytics = intakeAnalytics;
   postProgress(requestId, file.size, file.size, 'Completed');
   self.postMessage({
     type: 'complete',
     requestId,
     headerDiag,
     analytics,
+    intakeAnalytics,
     metadata: {
       parser: 'csv-stream',
       ingestRoute,
@@ -222,7 +226,7 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
         invalidDateRows,
         omittedSamples,
       },
-      paritySignature: `${analytics.total}|${analytics.distinctRefs}|${analytics.timeline.length}|${analytics.weekly.length}`,
+      paritySignature: `${analytics.total}|${analytics.distinctRefs}|${analytics.timeline.length}|${analytics.weekly.length}|${intakeAnalytics.totalProcessed}`,
     },
   });
 };
@@ -231,8 +235,8 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
   const ctx: Ctx = { sites, listings, users };
   const noFilter = noFilters(includeTest, regionRefs, initialTargetRefs, raNames);
 
-  if (noFilter && baseAnalytics && cachedStorageKey === storageKey) {
-    self.postMessage({ type: 'filtered', requestId, analytics: baseAnalytics });
+  if (noFilter && baseAnalytics && baseIntakeAnalytics && cachedStorageKey === storageKey) {
+    self.postMessage({ type: 'filtered', requestId, analytics: baseAnalytics, intakeAnalytics: baseIntakeAnalytics });
     return;
   }
 
@@ -251,9 +255,12 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
       acc.add(row);
     }
   }
-  const analytics = acc.finalize();
-  if (noFilter) baseAnalytics = analytics;
-  self.postMessage({ type: 'filtered', requestId, analytics });
+  const { referral: analytics, intake: intakeAnalytics } = acc.finalize();
+  if (noFilter) {
+    baseAnalytics = analytics;
+    baseIntakeAnalytics = intakeAnalytics;
+  }
+  self.postMessage({ type: 'filtered', requestId, analytics, intakeAnalytics });
 };
 
 self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
@@ -290,6 +297,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       await store.clear(msg.storageKey);
       cachedStorageKey = msg.storageKey;
       baseAnalytics = null;
+      baseIntakeAnalytics = null;
       postProgress(msg.requestId, 0, 100, 'Reading workbook...');
       const wb = XLSX.read(msg.buffer, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
@@ -323,13 +331,15 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       if (batch.length) await store.appendBatch(batch);
       await store.finalizeAppend();
       postProgress(msg.requestId, 100, 100, 'Completed');
-      const analytics = acc.finalize();
+      const { referral: analytics, intake: intakeAnalytics } = acc.finalize();
       baseAnalytics = analytics;
+      baseIntakeAnalytics = intakeAnalytics;
       self.postMessage({
         type: 'complete',
         requestId: msg.requestId,
         headerDiag,
         analytics,
+        intakeAnalytics,
         metadata: {
           parser: 'xlsx-worker',
           ingestRoute: msg.ingestRoute,

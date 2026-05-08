@@ -6,3 +6,4 @@ export { Funnel } from './Funnel';
 export { Geo } from './Geo';
 export { KPI } from './KPI';
 export { Upload } from './Upload';
+export { Gauge } from './Gauge';
