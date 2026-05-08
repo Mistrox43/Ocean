@@ -48,6 +48,7 @@ const getStore = async () => {
 let cachedStorageKey = '';
 let baseAnalytics: ReferralAnalytics | null = null;
 let baseIntakeAnalytics: IntakeAnalytics | null = null;
+let activeFilterRequestId = 0;
 
 const noFilters = (includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined) =>
   includeTest && regionRefs.length === 0 && (!initialTargetRefs || !initialTargetRefs.length) && (!raNames || !raNames.length);
@@ -232,6 +233,7 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
 };
 
 const filterFromStore = async (requestId: number, storageKey: string, includeTest: boolean, regionRefs: string[] = [], initialTargetRefs: string[] | undefined, raNames: string[] | undefined, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null) => {
+  activeFilterRequestId = requestId;
   const ctx: Ctx = { sites, listings, users };
   const noFilter = noFilters(includeTest, regionRefs, initialTargetRefs, raNames);
 
@@ -242,11 +244,13 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
 
   const store = await getStore();
   await store.open(storageKey);
+  if (activeFilterRequestId !== requestId) return;
   const refSet = regionRefs.length ? new Set(regionRefs) : null;
   const initialTargetSet = initialTargetRefs?.length ? new Set(initialTargetRefs) : null;
   const raNameSet = raNames?.length ? new Set(raNames) : null;
   const acc = new ReferralAnalyticsAccumulator(ctx);
   for await (const batch of store.streamRead(50000)) {
+    if (activeFilterRequestId !== requestId) return;
     for (const row of batch) {
       if (!includeTest && row.sentToTestListing === 'TRUE') continue;
       if (refSet && !refSet.has(row.referralTargetRef)) continue;
@@ -255,6 +259,7 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
       acc.add(row);
     }
   }
+  if (activeFilterRequestId !== requestId) return;
   const { referral: analytics, intake: intakeAnalytics } = acc.finalize();
   if (noFilter) {
     baseAnalytics = analytics;
