@@ -10,12 +10,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@duckdb/duckdb-wasm": "^1.33.1-dev45.0",
     "@radix-ui/react-progress": "^1.1.8",
     "@radix-ui/react-scroll-area": "^1.2.10",
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-tabs": "^1.1.13",
-    "apache-arrow": "^21.1.0",
     "clsx": "^2.1.1",
     "lucide-react": "^1.7.0",
     "react": "^19.2.4",

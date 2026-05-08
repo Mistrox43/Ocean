@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import type { HeaderDiag } from '@/types';
-import FileParserWorker from '@/workers/file-parser.worker?worker';
+import FileParserWorker from '@/workers/file-parser.worker?worker&inline';
 
 type WorkerMessage =
   | { type: 'tabular-complete'; requestId: number; rows: Record<string, string>[]; headerDiag: HeaderDiag[] }

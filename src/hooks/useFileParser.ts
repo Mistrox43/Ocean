@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HeaderDiag, ReferralAnalytics } from '@/types';
-import FileParserWorker from '@/workers/file-parser.worker?worker';
+import FileParserWorker from '@/workers/file-parser.worker?worker&inline';
 
 const LARGE_FILE_BYTES = 50 * 1024 * 1024;
 
@@ -34,19 +34,10 @@ export type IngestMetadata = {
   paritySignature?: string;
 };
 
-export type TelemetryEvent = {
-  type: 'telemetry';
-  requestId: number;
-  event: string;
-  timestamp: number;
-  details: Record<string, number | string | boolean>;
-};
-
 type WorkerMessage =
   | { type: 'progress'; requestId: number; processed: number; total: number; pct: number; stage: string }
   | { type: 'complete'; requestId: number; headerDiag: HeaderDiag[]; metadata: IngestMetadata; analytics: ReferralAnalytics | null }
   | { type: 'filtered'; requestId: number; analytics: ReferralAnalytics | null }
-  | TelemetryEvent
   | { type: 'error'; requestId: number; error: string };
 
 export function useFileParser() {
@@ -60,7 +51,6 @@ export function useFileParser() {
   const [analytics, setAnalytics] = useState<ReferralAnalytics | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [telemetry, setTelemetry] = useState<TelemetryEvent[]>([]);
 
   const destroyWorker = useCallback(() => {
     if (workerRef.current) workerRef.current.terminate();
@@ -78,7 +68,6 @@ export function useFileParser() {
     setAnalytics(null);
     setError(null);
     setIsLoading(false);
-    setTelemetry([]);
   }, [destroyWorker]);
 
   const ingest = useCallback(async (
@@ -117,13 +106,6 @@ export function useFileParser() {
 
       worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
         const msg = event.data;
-        if (msg.type === 'telemetry') {
-          setTelemetry(prev => (prev.length >= 500 ? [...prev.slice(-499), msg] : [...prev, msg]));
-          if (typeof console !== 'undefined') {
-            console.debug('[worker telemetry]', msg.event, msg.details);
-          }
-          return;
-        }
         if (msg.type === 'progress') {
           if (msg.requestId !== ingestRequestIdRef.current) return;
           setProgress({ processed: msg.processed, total: msg.total, pct: msg.pct, stage: msg.stage });
@@ -165,31 +147,16 @@ export function useFileParser() {
     }
   }, [destroyWorker]);
 
-  const pendingRecomputeRef = useRef<number | null>(null);
-
   const recomputeFromStore = useCallback((storageKey: string, includeTest: boolean, regionRefs: string[], initialTargetRefs?: string[], raNames?: string[], ctx?: { sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null }) => {
     if (!workerRef.current) return;
-    if (pendingRecomputeRef.current != null) {
-      clearTimeout(pendingRecomputeRef.current);
-    }
-    pendingRecomputeRef.current = window.setTimeout(() => {
-      pendingRecomputeRef.current = null;
-      if (!workerRef.current) return;
-      const requestId = ++requestIdRef.current;
-      filterRequestIdRef.current = requestId;
-      setIsLoading(true);
-      setProgress(p => p ? { ...p, stage: 'Applying filters...' } : { processed: 0, total: 0, pct: 0, stage: 'Applying filters...' });
-      workerRef.current.postMessage({ type: 'filter-from-store', requestId, storageKey, includeTest, regionRefs, initialTargetRefs: initialTargetRefs?.length ? initialTargetRefs : undefined, raNames: raNames?.length ? raNames : undefined, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null });
-    }, 250);
+    const requestId = ++requestIdRef.current;
+    filterRequestIdRef.current = requestId;
+    setIsLoading(true);
+    setProgress(p => p ? { ...p, stage: 'Applying filters...' } : { processed: 0, total: 0, pct: 0, stage: 'Applying filters...' });
+    workerRef.current.postMessage({ type: 'filter-from-store', requestId, storageKey, includeTest, regionRefs, initialTargetRefs: initialTargetRefs?.length ? initialTargetRefs : undefined, raNames: raNames?.length ? raNames : undefined, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null });
   }, []);
 
-  useEffect(() => () => {
-    if (pendingRecomputeRef.current != null) {
-      clearTimeout(pendingRecomputeRef.current);
-      pendingRecomputeRef.current = null;
-    }
-    destroyWorker();
-  }, [destroyWorker]);
+  useEffect(() => () => destroyWorker(), [destroyWorker]);
 
-  return { ingest, recomputeFromStore, progress, metadata, headerDiag, analytics, error, isLoading, reset, telemetry };
+  return { ingest, recomputeFromStore, progress, metadata, headerDiag, analytics, error, isLoading, reset };
 }
