@@ -147,16 +147,31 @@ export function useFileParser() {
     }
   }, [destroyWorker]);
 
+  const pendingRecomputeRef = useRef<number | null>(null);
+
   const recomputeFromStore = useCallback((storageKey: string, includeTest: boolean, regionRefs: string[], initialTargetRefs?: string[], raNames?: string[], ctx?: { sites: Record<string, string>[] | null; listings: Record<string, string>[] | null; users: Record<string, string>[] | null }) => {
     if (!workerRef.current) return;
-    const requestId = ++requestIdRef.current;
-    filterRequestIdRef.current = requestId;
-    setIsLoading(true);
-    setProgress(p => p ? { ...p, stage: 'Applying filters...' } : { processed: 0, total: 0, pct: 0, stage: 'Applying filters...' });
-    workerRef.current.postMessage({ type: 'filter-from-store', requestId, storageKey, includeTest, regionRefs, initialTargetRefs: initialTargetRefs?.length ? initialTargetRefs : undefined, raNames: raNames?.length ? raNames : undefined, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null });
+    if (pendingRecomputeRef.current != null) {
+      clearTimeout(pendingRecomputeRef.current);
+    }
+    pendingRecomputeRef.current = window.setTimeout(() => {
+      pendingRecomputeRef.current = null;
+      if (!workerRef.current) return;
+      const requestId = ++requestIdRef.current;
+      filterRequestIdRef.current = requestId;
+      setIsLoading(true);
+      setProgress(p => p ? { ...p, stage: 'Applying filters...' } : { processed: 0, total: 0, pct: 0, stage: 'Applying filters...' });
+      workerRef.current.postMessage({ type: 'filter-from-store', requestId, storageKey, includeTest, regionRefs, initialTargetRefs: initialTargetRefs?.length ? initialTargetRefs : undefined, raNames: raNames?.length ? raNames : undefined, sites: ctx?.sites || null, listings: ctx?.listings || null, users: ctx?.users || null });
+    }, 250);
   }, []);
 
-  useEffect(() => () => destroyWorker(), [destroyWorker]);
+  useEffect(() => () => {
+    if (pendingRecomputeRef.current != null) {
+      clearTimeout(pendingRecomputeRef.current);
+      pendingRecomputeRef.current = null;
+    }
+    destroyWorker();
+  }, [destroyWorker]);
 
   return { ingest, recomputeFromStore, progress, metadata, headerDiag, analytics, error, isLoading, reset };
 }
