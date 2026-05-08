@@ -709,6 +709,104 @@ async function computeSqlAggregates(tableName: string, whereClause: string): Pro
   };
 }
 
+function emptyAnalytics(): ReferralAnalytics {
+  return {
+    total: 0,
+    distinctRefs: 0,
+    uniqueSendingSites: 0,
+    uniqueTargetSites: 0,
+    uniqueSenders: 0,
+    uniqueProfIds: 0,
+    uniqueTargetRefs: 0,
+    distinctInitialTargetRefs: [],
+    curMCount: 0,
+    curM: '',
+    lastFullM: '',
+    lastFullCount: 0,
+    chg1: { val: 'N/A', num: 0 },
+    cmp1M: '',
+    cmp1Count: 0,
+    chg3: { val: 'N/A', num: 0 },
+    cmp3M: '',
+    cmp3Count: 0,
+    chg12: { val: 'N/A', num: 0 },
+    cmp12M: '',
+    cmp12Count: 0,
+    earliestDate: '',
+    fhirCount: 0,
+    fhirPct: 0,
+    timeline: [],
+    weekly: [],
+    byTarget: [],
+    bySource: [],
+    bySender: [],
+    byRegion: [],
+    byRaName: [],
+    byService: [],
+    byClinType: [],
+    byEmrSent: [],
+    byEmrRecv: [],
+  };
+}
+
+async function computeDistinctInitialTargetRefs(tableName: string): Promise<{ ref: string; title: string }[]> {
+  const conn = await getConn();
+  const colsRes = await conn.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema='main' AND table_name=${sqlLit(tableName)}`,
+  );
+  const cols = new Set(
+    colsRes.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string } }).toJSON().column_name),
+  );
+  if (!cols.has('initialReferralTargetRef')) return [];
+  const listingColsRes = await conn.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema='main' AND table_name='lookup_listings'`,
+  );
+  const listingCols = new Set(
+    listingColsRes.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string } }).toJSON().column_name),
+  );
+  const joinable = listingCols.has('ref') && listingCols.has('title');
+  const sql = joinable
+    ? `SELECT DISTINCT r.${ident('initialReferralTargetRef')} AS ref,
+              COALESCE(NULLIF(l.${ident('title')}, ''), r.${ident('initialReferralTargetRef')}) AS title
+       FROM ${ident(tableName)} r
+       LEFT JOIN ${ident('lookup_listings')} l ON l.${ident('ref')} = r.${ident('initialReferralTargetRef')}
+       WHERE NULLIF(r.${ident('initialReferralTargetRef')}, '') IS NOT NULL
+       ORDER BY ref`
+    : `SELECT DISTINCT ${ident('initialReferralTargetRef')} AS ref, ${ident('initialReferralTargetRef')} AS title
+       FROM ${ident(tableName)}
+       WHERE NULLIF(${ident('initialReferralTargetRef')}, '') IS NOT NULL
+       ORDER BY ref`;
+  const res = await conn.query(sql);
+  return res.toArray().map(r => {
+    const j = (r as { toJSON: () => { ref: string; title: string } }).toJSON();
+    return { ref: String(j.ref ?? ''), title: String(j.title ?? j.ref ?? '') };
+  });
+}
+
+async function buildAnalyticsFromSql(
+  tableName: string,
+  whereClause: string,
+  includeInitialRefs: boolean,
+): Promise<ReferralAnalytics | null> {
+  const kpis = await computeSqlKpis(tableName, whereClause);
+  if (!kpis) return null;
+  const agg = await computeSqlAggregates(tableName, whereClause);
+  if (!agg) return null;
+  const analytics = emptyAnalytics();
+  analytics.total = kpis.total;
+  analytics.distinctRefs = kpis.distinctRefs;
+  analytics.uniqueSendingSites = kpis.uniqueSendingSites;
+  analytics.uniqueTargetSites = kpis.uniqueTargetSites;
+  analytics.uniqueSenders = kpis.uniqueSenders;
+  analytics.uniqueProfIds = kpis.uniqueProfIds;
+  analytics.uniqueTargetRefs = kpis.uniqueTargetRefs;
+  applySqlAggregates(analytics, agg);
+  if (includeInitialRefs) {
+    analytics.distinctInitialTargetRefs = await computeDistinctInitialTargetRefs(tableName).catch(() => []);
+  }
+  return analytics;
+}
+
 function applySqlAggregates(analytics: ReferralAnalytics, agg: SqlAggregates): void {
   if (agg.timeline.length) {
     analytics.timeline = agg.timeline;
@@ -821,23 +919,26 @@ const processCsvStreaming = async (
   (rowStore as unknown as { rowCount: number }).rowCount = acceptedRows;
 
   postProgress(requestId, Math.floor(file.size * 0.8), file.size, 'Computing analytics...');
-  const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
-  for await (const batch of rowStore.streamRead(50000)) {
-    for (const row of batch) acc.add(row);
+  let analytics = await buildAnalyticsFromSql(table, '', true).catch(() => null);
+  if (!analytics) {
+    const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
+    for await (const batch of rowStore.streamRead(50000)) {
+      for (const row of batch) acc.add(row);
+    }
+    analytics = acc.finalize();
+    const sqlKpis = await computeSqlKpis(table, '').catch(() => null);
+    if (sqlKpis) {
+      analytics.total = sqlKpis.total;
+      analytics.distinctRefs = sqlKpis.distinctRefs;
+      analytics.uniqueSendingSites = sqlKpis.uniqueSendingSites;
+      analytics.uniqueTargetSites = sqlKpis.uniqueTargetSites;
+      analytics.uniqueSenders = sqlKpis.uniqueSenders;
+      analytics.uniqueProfIds = sqlKpis.uniqueProfIds;
+      analytics.uniqueTargetRefs = sqlKpis.uniqueTargetRefs;
+    }
+    const sqlAgg = await computeSqlAggregates(table, '').catch(() => null);
+    if (sqlAgg) applySqlAggregates(analytics, sqlAgg);
   }
-  const analytics = acc.finalize();
-  const sqlKpis = await computeSqlKpis(table, '').catch(() => null);
-  if (sqlKpis) {
-    analytics.total = sqlKpis.total;
-    analytics.distinctRefs = sqlKpis.distinctRefs;
-    analytics.uniqueSendingSites = sqlKpis.uniqueSendingSites;
-    analytics.uniqueTargetSites = sqlKpis.uniqueTargetSites;
-    analytics.uniqueSenders = sqlKpis.uniqueSenders;
-    analytics.uniqueProfIds = sqlKpis.uniqueProfIds;
-    analytics.uniqueTargetRefs = sqlKpis.uniqueTargetRefs;
-  }
-  const sqlAgg = await computeSqlAggregates(table, '').catch(() => null);
-  if (sqlAgg) applySqlAggregates(analytics, sqlAgg);
   baseAnalytics = analytics;
 
   const sampleRes = await conn.query(`SELECT * FROM ${ident(table)} LIMIT 1`);
@@ -926,9 +1027,12 @@ const processXlsxSmall = async (
   await registerLookupTables({ sites, listings, users });
 
   postProgress(requestId, 90, 100, 'Computing analytics...');
-  const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
-  for (const row of mapped) acc.add(row);
-  const analytics = acc.finalize();
+  let analytics = await buildAnalyticsFromSql(rowStore.getTableName(), '', true).catch(() => null);
+  if (!analytics) {
+    const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
+    for (const row of mapped) acc.add(row);
+    analytics = acc.finalize();
+  }
   baseAnalytics = analytics;
 
   postProgress(requestId, 100, 100, 'Completed');
@@ -999,24 +1103,30 @@ const filterFromStore = async (
   }
 
   const whereClause = clauses.join(' AND ');
-  const acc = new ReferralAnalyticsAccumulator(ctx);
-  const iterator = await rowStore.streamReadFiltered(50000, whereClause);
-  for await (const batch of iterator) {
-    for (const row of batch) acc.add(row);
+  let analytics = await buildAnalyticsFromSql(rowStore.getTableName(), whereClause, false).catch(() => null);
+  if (!analytics) {
+    const acc = new ReferralAnalyticsAccumulator(ctx);
+    const iterator = await rowStore.streamReadFiltered(50000, whereClause);
+    for await (const batch of iterator) {
+      for (const row of batch) acc.add(row);
+    }
+    analytics = acc.finalize();
+    const filteredKpis = await computeSqlKpis(rowStore.getTableName(), whereClause).catch(() => null);
+    if (filteredKpis) {
+      analytics.total = filteredKpis.total;
+      analytics.distinctRefs = filteredKpis.distinctRefs;
+      analytics.uniqueSendingSites = filteredKpis.uniqueSendingSites;
+      analytics.uniqueTargetSites = filteredKpis.uniqueTargetSites;
+      analytics.uniqueSenders = filteredKpis.uniqueSenders;
+      analytics.uniqueProfIds = filteredKpis.uniqueProfIds;
+      analytics.uniqueTargetRefs = filteredKpis.uniqueTargetRefs;
+    }
+    const filteredAgg = await computeSqlAggregates(rowStore.getTableName(), whereClause).catch(() => null);
+    if (filteredAgg) applySqlAggregates(analytics, filteredAgg);
   }
-  const analytics = acc.finalize();
-  const filteredKpis = await computeSqlKpis(rowStore.getTableName(), whereClause).catch(() => null);
-  if (filteredKpis) {
-    analytics.total = filteredKpis.total;
-    analytics.distinctRefs = filteredKpis.distinctRefs;
-    analytics.uniqueSendingSites = filteredKpis.uniqueSendingSites;
-    analytics.uniqueTargetSites = filteredKpis.uniqueTargetSites;
-    analytics.uniqueSenders = filteredKpis.uniqueSenders;
-    analytics.uniqueProfIds = filteredKpis.uniqueProfIds;
-    analytics.uniqueTargetRefs = filteredKpis.uniqueTargetRefs;
+  if (baseAnalytics && !analytics.distinctInitialTargetRefs.length) {
+    analytics.distinctInitialTargetRefs = baseAnalytics.distinctInitialTargetRefs;
   }
-  const filteredAgg = await computeSqlAggregates(rowStore.getTableName(), whereClause).catch(() => null);
-  if (filteredAgg) applySqlAggregates(analytics, filteredAgg);
   if (noFilter) baseAnalytics = analytics;
   self.postMessage({ type: 'filtered', requestId, analytics });
 };
