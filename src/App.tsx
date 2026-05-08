@@ -137,6 +137,7 @@ export default function App() {
     let base=selectedRaNames.length?listings.filter(l=>selectedRaNames.includes(l.raName)):listings;
     return new Set(base.filter(l=>l.healthRegion===selectedRegion).map(l=>l.ref).filter(Boolean));
   },[listings,selectedRegion,selectedRaNames]);
+  const regionRefsKey=useMemo(()=>regionListingRefs?[...regionListingRefs].sort().join('|'):'',[regionListingRefs]);
   const lastIngestSigRef = useRef('');
   useEffect(() => {
     const storageKey = referralParser.metadata?.storageKey;
@@ -154,7 +155,7 @@ export default function App() {
       selectedRaNames.length ? selectedRaNames : undefined,
       { sites, listings, users },
     );
-  }, [referralParser.metadata?.storageKey, referralParser.metadata?.paritySignature, referralParser.recomputeFromStore, includeTest, regionListingRefs, referralInitialTargetFilter, selectedRaNames, sites, listings, users]);
+  }, [referralParser.metadata?.storageKey, referralParser.metadata?.paritySignature, referralParser.recomputeFromStore, includeTest, regionRefsKey, referralInitialTargetFilter, selectedRaNames]);
   const referralAnalytics = useReferralAnalytics(null, null, sites, listings, users, referralParser.analytics);
   const referralIngestDiag = referralParser.metadata?.diagnostics;
   const referralIngestAcceptance = referralIngestDiag ? percentage(referralIngestDiag.acceptedRows, Math.max(referralIngestDiag.sourceRows, 1)) : 0;
