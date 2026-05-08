@@ -149,6 +149,304 @@ function ident(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
+type SqlAggregates = {
+  timeline: { label: string; value: number; cumulative: number }[];
+  weekly: { label: string; total: number; test: number; nonTest: number; senders: number; receivers: number }[];
+  byRegion: { label: string; value: number }[];
+  byRaName: { label: string; value: number }[];
+  byService: { label: string; value: number }[];
+  byClinType: { label: string; value: number }[];
+  byEmrSent: { label: string; value: number }[];
+  byEmrRecv: { label: string; value: number }[];
+  fhirCount: number;
+  earliestDate: string;
+};
+
+function topNEntries(entries: [string, number][]): { label: string; value: number }[] {
+  const sorted = [...entries].sort((a, b) => b[1] - a[1]);
+  const top = sorted.slice(0, 10);
+  const other = sorted.slice(10).reduce((s, e) => s + e[1], 0);
+  const out: { label: string; value: number }[] = top.map(([l, v]) => ({ label: l, value: v }));
+  if (other > 0) out.push({ label: 'All others', value: other });
+  return out;
+}
+
+async function queryPairs(sql: string, labelCol: string, valueCol: string): Promise<[string, number][]> {
+  const conn = await getConn();
+  const res = await conn.query(sql);
+  return res.toArray().map((r: unknown) => {
+    const row = (r as { toJSON: () => Record<string, unknown> }).toJSON();
+    return [String(row[labelCol] ?? ''), Number(row[valueCol] ?? 0)] as [string, number];
+  });
+}
+
+async function computeSqlAggregates(tableName: string, whereClause: string): Promise<SqlAggregates | null> {
+  const conn = await getConn();
+  const colsRes = await conn.query(
+    `SELECT column_name FROM information_schema.columns WHERE table_schema='main' AND table_name=${sqlLit(tableName)}`,
+  );
+  const cols = new Set(
+    colsRes.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string } }).toJSON().column_name),
+  );
+  if (!cols.size) return null;
+  const where = whereClause ? `WHERE ${whereClause}` : '';
+  const prefix = whereClause ? `AND ${whereClause}` : '';
+
+  const timeline: { label: string; value: number; cumulative: number }[] = [];
+  let earliestDate = '';
+  if (cols.has('referralCreationDate')) {
+    const monthlyRes = await conn.query(
+      `SELECT substring(${ident('referralCreationDate')}, 1, 7) AS m, COUNT(*)::BIGINT AS n
+       FROM ${ident(tableName)}
+       WHERE length(${ident('referralCreationDate')}) >= 7 ${prefix}
+       GROUP BY m
+       ORDER BY m`,
+    );
+    let cum = 0;
+    for (const r of monthlyRes.toArray()) {
+      const row = (r as { toJSON: () => { m: string; n: number } }).toJSON();
+      const v = Number(row.n || 0);
+      cum += v;
+      timeline.push({ label: String(row.m), value: v, cumulative: cum });
+    }
+    const minRes = await conn.query(
+      `SELECT MIN(${ident('referralCreationDate')}) AS d
+       FROM ${ident(tableName)}
+       WHERE regexp_matches(${ident('referralCreationDate')}, '^\\d{4}-\\d{2}-\\d{2}') ${prefix}`,
+    );
+    const minRow = minRes.toArray()[0] as { toJSON: () => { d: string | null } } | undefined;
+    earliestDate = minRow ? String(minRow.toJSON().d ?? '').slice(0, 10) : '';
+  }
+
+  const weekly: { label: string; total: number; test: number; nonTest: number; senders: number; receivers: number }[] = [];
+  if (cols.has('referralCreationDate')) {
+    const testExpr = cols.has('sentToTestListing')
+      ? `CASE WHEN ${ident('sentToTestListing')} = 'TRUE' THEN 1 ELSE 0 END`
+      : `0`;
+    const nonTestExpr = cols.has('sentToTestListing')
+      ? `CASE WHEN ${ident('sentToTestListing')} = 'TRUE' THEN 0 ELSE 1 END`
+      : `1`;
+    const profExpr = cols.has('referrerProfessionalId') && cols.has('sentToTestListing')
+      ? `CASE WHEN ${ident('sentToTestListing')} <> 'TRUE' THEN NULLIF(${ident('referrerProfessionalId')}, '') END`
+      : cols.has('referrerProfessionalId')
+        ? `NULLIF(${ident('referrerProfessionalId')}, '')`
+        : `NULL`;
+    const recvExpr = cols.has('referralTargetRef') && cols.has('sentToTestListing')
+      ? `CASE WHEN ${ident('sentToTestListing')} <> 'TRUE' THEN NULLIF(${ident('referralTargetRef')}, '') END`
+      : cols.has('referralTargetRef')
+        ? `NULLIF(${ident('referralTargetRef')}, '')`
+        : `NULL`;
+    const weeklyRes = await conn.query(
+      `SELECT strftime(date_trunc('week', TRY_CAST(${ident('referralCreationDate')} AS DATE)), '%Y-%m-%d') AS wk,
+              COUNT(*)::BIGINT AS total,
+              SUM(${testExpr})::BIGINT AS test,
+              SUM(${nonTestExpr})::BIGINT AS nonTest,
+              COUNT(DISTINCT ${profExpr})::BIGINT AS senders,
+              COUNT(DISTINCT ${recvExpr})::BIGINT AS receivers
+       FROM ${ident(tableName)}
+       WHERE TRY_CAST(${ident('referralCreationDate')} AS DATE) IS NOT NULL ${prefix}
+       GROUP BY wk
+       ORDER BY wk`,
+    );
+    for (const r of weeklyRes.toArray()) {
+      const row = (r as { toJSON: () => { wk: string; total: number; test: number; nonTest: number; senders: number; receivers: number } }).toJSON();
+      weekly.push({
+        label: String(row.wk ?? ''),
+        total: Number(row.total || 0),
+        test: Number(row.test || 0),
+        nonTest: Number(row.nonTest || 0),
+        senders: Number(row.senders || 0),
+        receivers: Number(row.receivers || 0),
+      });
+    }
+  }
+
+  let byRegion: { label: string; value: number }[] = [];
+  if (cols.has('referralTargetRef')) {
+    const hasListings = await conn.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema='main' AND table_name='lookup_listings' AND column_name IN ('ref', 'healthRegion')`,
+    );
+    const listingCols = new Set(
+      hasListings.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string } }).toJSON().column_name),
+    );
+    if (listingCols.has('ref') && listingCols.has('healthRegion')) {
+      const pairs = await queryPairs(
+        `SELECT COALESCE(
+             NULLIF(l.${ident('healthRegion')}, ''),
+             CASE WHEN l.${ident('ref')} IS NULL THEN 'Referrals not mapped to listings' ELSE 'Region not defined' END
+           ) AS label,
+           COUNT(*)::BIGINT AS value
+         FROM ${ident(tableName)} r
+         LEFT JOIN ${ident('lookup_listings')} l ON l.${ident('ref')} = r.${ident('referralTargetRef')}
+         ${where}
+         GROUP BY label`,
+        'label',
+        'value',
+      );
+      byRegion = topNEntries(pairs);
+    }
+  }
+
+  let byRaName: { label: string; value: number }[] = [];
+  if (cols.has('raName')) {
+    const pairs = await queryPairs(
+      `SELECT COALESCE(NULLIF(${ident('raName')}, ''), 'Unknown') AS label, COUNT(*)::BIGINT AS value
+       FROM ${ident(tableName)} ${where}
+       GROUP BY label`,
+      'label',
+      'value',
+    );
+    byRaName = topNEntries(pairs);
+  }
+
+  let byService: { label: string; value: number }[] = [];
+  {
+    const hasCurrent = cols.has('currentHealthService');
+    const hasInitial = cols.has('initialHealthService');
+    if (hasCurrent || hasInitial) {
+      const expr = hasCurrent && hasInitial
+        ? `COALESCE(NULLIF(${ident('currentHealthService')}, ''), NULLIF(${ident('initialHealthService')}, ''), 'Unknown')`
+        : hasCurrent
+          ? `COALESCE(NULLIF(${ident('currentHealthService')}, ''), 'Unknown')`
+          : `COALESCE(NULLIF(${ident('initialHealthService')}, ''), 'Unknown')`;
+      const pairs = await queryPairs(
+        `SELECT ${expr} AS label, COUNT(*)::BIGINT AS value
+         FROM ${ident(tableName)} ${where}
+         GROUP BY label`,
+        'label',
+        'value',
+      );
+      byService = topNEntries(pairs);
+    }
+  }
+
+  let byClinType: { label: string; value: number }[] = [];
+  if (cols.has('referrerClinicianType')) {
+    const pairs = await queryPairs(
+      `SELECT COALESCE(NULLIF(${ident('referrerClinicianType')}, ''), 'Unknown') AS label, COUNT(*)::BIGINT AS value
+       FROM ${ident(tableName)} ${where}
+       GROUP BY label`,
+      'label',
+      'value',
+    );
+    byClinType = topNEntries(pairs);
+  }
+
+  let byEmrSent: { label: string; value: number }[] = [];
+  let byEmrRecv: { label: string; value: number }[] = [];
+  {
+    const siteCols = await conn.query(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema='main' AND table_name='lookup_sites' AND column_name IN ('siteNumber', 'emr')`,
+    );
+    const sCols = new Set(
+      siteCols.toArray().map((r: unknown) => (r as { toJSON: () => { column_name: string } }).toJSON().column_name),
+    );
+    const siteNormExpr = (col: string) =>
+      `CAST(TRY_CAST(regexp_replace(${col}, '\\.0+$', '') AS INTEGER) AS VARCHAR)`;
+    if (sCols.has('siteNumber') && sCols.has('emr') && cols.has('srcsiteNum')) {
+      const pairs = await queryPairs(
+        `SELECT COALESCE(NULLIF(s.${ident('emr')}, ''), 'Unknown EMR') AS label, COUNT(*)::BIGINT AS value
+         FROM ${ident(tableName)} r
+         LEFT JOIN ${ident('lookup_sites')} s ON ${siteNormExpr(`s.${ident('siteNumber')}`)} = ${siteNormExpr(`r.${ident('srcsiteNum')}`)}
+         ${where}
+         GROUP BY label
+         ORDER BY value DESC`,
+        'label',
+        'value',
+      );
+      byEmrSent = pairs.map(([l, v]) => ({ label: l || 'None', value: v }));
+    }
+    if (sCols.has('siteNumber') && sCols.has('emr') && cols.has('siteNum')) {
+      const pairs = await queryPairs(
+        `SELECT COALESCE(NULLIF(s.${ident('emr')}, ''), 'Unknown EMR') AS label, COUNT(*)::BIGINT AS value
+         FROM ${ident(tableName)} r
+         LEFT JOIN ${ident('lookup_sites')} s ON ${siteNormExpr(`s.${ident('siteNumber')}`)} = ${siteNormExpr(`r.${ident('siteNum')}`)}
+         ${where}
+         GROUP BY label
+         ORDER BY value DESC`,
+        'label',
+        'value',
+      );
+      byEmrRecv = pairs.map(([l, v]) => ({ label: l || 'None', value: v }));
+    }
+  }
+
+  let fhirCount = 0;
+  if (cols.has('referralSource')) {
+    const res = await conn.query(
+      `SELECT COUNT(*)::BIGINT AS n
+       FROM ${ident(tableName)}
+       WHERE UPPER(COALESCE(${ident('referralSource')}, '')) LIKE '%FHIR%' ${prefix}`,
+    );
+    const row = res.toArray()[0] as { toJSON: () => { n: number } } | undefined;
+    fhirCount = row ? Number(row.toJSON().n || 0) : 0;
+  }
+
+  return {
+    timeline,
+    weekly,
+    byRegion,
+    byRaName,
+    byService,
+    byClinType,
+    byEmrSent,
+    byEmrRecv,
+    fhirCount,
+    earliestDate,
+  };
+}
+
+function applySqlAggregates(analytics: ReferralAnalytics, agg: SqlAggregates): void {
+  if (agg.timeline.length) {
+    analytics.timeline = agg.timeline;
+    const monthAt = (off: number) => {
+      const d = new Date();
+      d.setUTCDate(1);
+      d.setUTCMonth(d.getUTCMonth() + off);
+      return d.toISOString().slice(0, 7);
+    };
+    const lookup = new Map(agg.timeline.map(t => [t.label, t.value]));
+    const curM = monthAt(0);
+    const lastFullM = monthAt(-1);
+    const cmp1M = monthAt(-2);
+    const cmp3M = monthAt(-4);
+    const cmp12M = monthAt(-13);
+    const curMCount = lookup.get(curM) || 0;
+    const lastFullCount = lookup.get(lastFullM) || 0;
+    const cmp1Count = lookup.get(cmp1M) || 0;
+    const cmp3Count = lookup.get(cmp3M) || 0;
+    const cmp12Count = lookup.get(cmp12M) || 0;
+    const pctChg = (cur: number, prev: number) => {
+      if (prev === 0) return { val: 'N/A', num: 0 };
+      const num = Math.round(((cur - prev) / prev) * 1000) / 10;
+      return { val: (num >= 0 ? '+' : '') + num + '%', num };
+    };
+    analytics.curM = curM;
+    analytics.lastFullM = lastFullM;
+    analytics.cmp1M = cmp1M;
+    analytics.cmp3M = cmp3M;
+    analytics.cmp12M = cmp12M;
+    analytics.curMCount = curMCount;
+    analytics.lastFullCount = lastFullCount;
+    analytics.cmp1Count = cmp1Count;
+    analytics.cmp3Count = cmp3Count;
+    analytics.cmp12Count = cmp12Count;
+    analytics.chg1 = pctChg(lastFullCount, cmp1Count);
+    analytics.chg3 = pctChg(lastFullCount, cmp3Count);
+    analytics.chg12 = pctChg(lastFullCount, cmp12Count);
+  }
+  if (agg.weekly.length) analytics.weekly = agg.weekly;
+  if (agg.byRegion.length) analytics.byRegion = agg.byRegion;
+  if (agg.byRaName.length) analytics.byRaName = agg.byRaName;
+  if (agg.byService.length) analytics.byService = agg.byService;
+  if (agg.byClinType.length) analytics.byClinType = agg.byClinType;
+  if (agg.byEmrSent.length) analytics.byEmrSent = agg.byEmrSent;
+  if (agg.byEmrRecv.length) analytics.byEmrRecv = agg.byEmrRecv;
+  analytics.fhirCount = agg.fhirCount;
+  analytics.fhirPct = analytics.total === 0 ? 0 : Math.round((agg.fhirCount / analytics.total) * 1000) / 10;
+  if (agg.earliestDate) analytics.earliestDate = agg.earliestDate;
+}
+
 const noFilters = (includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined) =>
   includeTest && regionRefs.length === 0 && (!initialTargetRefs || !initialTargetRefs.length) && (!raNames || !raNames.length);
 
@@ -222,6 +520,8 @@ const processCsvStreaming = async (
     analytics.uniqueProfIds = sqlKpis.uniqueProfIds;
     analytics.uniqueTargetRefs = sqlKpis.uniqueTargetRefs;
   }
+  const sqlAgg = await computeSqlAggregates(table, '').catch(() => null);
+  if (sqlAgg) applySqlAggregates(analytics, sqlAgg);
   baseAnalytics = analytics;
 
   const sampleRes = await conn.query(`SELECT * FROM ${ident(table)} LIMIT 1`);
@@ -399,6 +699,8 @@ const filterFromStore = async (
     analytics.uniqueProfIds = filteredKpis.uniqueProfIds;
     analytics.uniqueTargetRefs = filteredKpis.uniqueTargetRefs;
   }
+  const filteredAgg = await computeSqlAggregates(rowStore.getTableName(), whereClause).catch(() => null);
+  if (filteredAgg) applySqlAggregates(analytics, filteredAgg);
   if (noFilter) baseAnalytics = analytics;
   self.postMessage({ type: 'filtered', requestId, analytics });
 };
