@@ -222,6 +222,7 @@ export default function App() {
             </SelectContent>
           </Select>}
           {uniqueRaNames.length>0&&<MultiSelectCombobox options={uniqueRaNames.map(n=>({ref:n,title:n}))} value={selectedRaNames} onChange={v=>startFilterTransition(()=>setSelectedRaNames(v))} placeholder='All RA Names' width={180}/>}
+          {referralInitialTargetOptions.length>0&&<MultiSelectCombobox options={referralInitialTargetOptions} value={referralInitialTargetFilter} onChange={v=>startFilterTransition(()=>{setReferralInitialTargetFilter(v);setReferralExpanded(null);})} placeholder='All Initial Targets' width={220}/>}
         </div>
       </div>
     </div>
@@ -565,7 +566,6 @@ export default function App() {
                   )}
                 </div>
                 <div style={{display:'flex',gap:10,alignItems:'center'}}>
-                  {referralInitialTargetOptions.length>0&&<MultiSelectCombobox options={referralInitialTargetOptions} value={referralInitialTargetFilter} onChange={v=>startFilterTransition(()=>{setReferralInitialTargetFilter(v);setReferralExpanded(null);})} placeholder='All Initial Targets' width={220}/>}
                   <input type='text' placeholder='Search...' value={referralSearchQuery} onChange={e=>setReferralSearchQuery(e.target.value)} style={{background:COLORS.background,border:'1px solid '+COLORS.border,borderRadius:6,padding:'7px 12px',color:COLORS.text,fontSize:13,width:200,outline:'none'}}/>
                   <span style={{fontSize:12,color:COLORS.dimmed,background:COLORS.border,padding:'2px 8px',borderRadius:10}}>{filteredReferralData.length} results</span>
                   {referralParser.metadata?.storageKey&&<button onClick={()=>{void exportToCSVStream(referralParser.metadata!.storageKey,'referral-data-'+new Date().toISOString().slice(0,10)+'.csv').catch((err: any)=>{if(err?.name==='AbortError') return; setParseErrors(p=>({...p,referrals:err?.message||'Failed to export referral data.'}));});}} style={{background:'linear-gradient(135deg,'+COLORS.accent+'22,'+COLORS.accent+'11)',border:'1px solid '+COLORS.accent+'44',borderRadius:6,padding:'7px 16px',color:COLORS.accent,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>Export Referral Data</button>}
