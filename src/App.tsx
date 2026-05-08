@@ -17,6 +17,7 @@ import { useReferralAnalytics } from './hooks/useReferralAnalytics';
 import { useFileParser, type IngestRoute } from './hooks/useFileParser';
 import { useTabularParser } from './hooks/useTabularParser';
 import { MultiSelectCombobox } from './components/MultiSelectCombobox';
+import { CentralIntakeTab } from './components/intake/CentralIntakeTab';
 import type { HeaderDiag } from './types';
 
 export default function App() {
@@ -273,6 +274,7 @@ export default function App() {
           <TabsTrigger value='sites'>Site Maturity</TabsTrigger>
           <TabsTrigger value='staffing'>Staffing</TabsTrigger>
           <TabsTrigger value='referrals'>Referral Activity</TabsTrigger>
+          <TabsTrigger value='intake'>Central Intake</TabsTrigger>
           <TabsTrigger value='dataquality'>Data Quality</TabsTrigger>
         </TabsList>
         <TabsContent value='overview'>
@@ -688,6 +690,11 @@ export default function App() {
               {filteredReferralData.length===0&&<div style={{textAlign:'center',padding:'32px 0',color:COLORS.dimmed}}>No results match your search.</div>}
             </div>
           </>:<div style={{textAlign:'center',padding:'40px 0',color:COLORS.dimmed}}>{referralsLoaded?'Load Listings, Sites, and Users files alongside Referral Analytics for full cross-referencing.':'Load the Referral Analytics export file to view referral activity.'}</div>}
+        </TabsContent>
+        <TabsContent value='intake'>
+          {referralParser.intakeAnalytics && referralParser.intakeAnalytics.totalProcessed > 0
+            ? <CentralIntakeTab intake={referralParser.intakeAnalytics} loadedAtLabel={referralParser.metadata?.fileName}/>
+            : <div style={{textAlign:'center',padding:'40px 0',color:COLORS.dimmed}}>{referralsLoaded?'Central Intake metrics require referralCreationDate. No qualifying rows found in the current filter.':'Load the Referral Analytics export file to view Central Intake analytics.'}</div>}
         </TabsContent>
         <TabsContent value='dataquality'>
           {dataQuality&&<>
