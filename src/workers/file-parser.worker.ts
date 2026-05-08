@@ -3,7 +3,7 @@ import * as XLSX from 'xlsx';
 import type { HeaderDiag, ReferralAnalytics } from '@/types';
 import { DuckDbRowStore } from '@/storage/duckdbRowStore';
 import { getConn } from '@/storage/duckdbEngine';
-import { ReferralAnalyticsAccumulator } from '@/lib/referralAnalyticsAccumulator';
+import { ReferralAnalyticsAccumulator, AccumulatorCardinalityError } from '@/lib/referralAnalyticsAccumulator';
 import { formatDate } from '@/utils';
 
 type Ctx = {
@@ -1262,6 +1262,9 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
     }
     await filterFromStore(msg.requestId, msg.storageKey, msg.includeTest, msg.regionRefs, msg.initialTargetRefs, msg.raNames, msg.sites, msg.listings, msg.users);
   } catch (error) {
+    if (error instanceof AccumulatorCardinalityError) {
+      postTelemetry(msg.requestId, 'guardrail_tripped', { field: error.field, limit: error.limit });
+    }
     const message = error instanceof Error ? error.message : 'Unable to parse file.';
     self.postMessage({ type: 'error', requestId: msg.requestId, error: message });
   }

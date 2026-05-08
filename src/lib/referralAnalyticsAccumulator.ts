@@ -2,7 +2,45 @@ import { formatDate, normalizeSiteNumber, percentage } from '@/utils';
 import type { ReferralAnalytics } from '@/types';
 
 type Row = Record<string, string>;
-type Ctx = { sites: Row[] | null; listings: Row[] | null; users: Row[] | null };
+type Ctx = {
+  sites: Row[] | null;
+  listings: Row[] | null;
+  users: Row[] | null;
+  limits?: Partial<AccumulatorLimits>;
+};
+
+export interface AccumulatorLimits {
+  maxSenders: number;
+  maxTargetSites: number;
+  maxSourceSites: number;
+  maxRegions: number;
+  maxServices: number;
+  maxClinTypes: number;
+  maxWeeks: number;
+  maxMonths: number;
+}
+
+export const DEFAULT_ACCUMULATOR_LIMITS: AccumulatorLimits = {
+  maxSenders: 500_000,
+  maxTargetSites: 50_000,
+  maxSourceSites: 50_000,
+  maxRegions: 10_000,
+  maxServices: 10_000,
+  maxClinTypes: 10_000,
+  maxWeeks: 10_000,
+  maxMonths: 2_400,
+};
+
+export class AccumulatorCardinalityError extends Error {
+  readonly field: string;
+  readonly limit: number;
+  constructor(field: string, limit: number) {
+    super(`Accumulator field "${field}" exceeded cardinality limit of ${limit}`);
+    this.name = 'AccumulatorCardinalityError';
+    this.field = field;
+    this.limit = limit;
+  }
+}
 
 export class ReferralAnalyticsAccumulator {
   private siteNameLookup: Record<string, string> = {};
@@ -39,10 +77,17 @@ export class ReferralAnalyticsAccumulator {
   private emrRecv: Record<string, number> = {};
   private sourceTypeMap: Record<string, number> = {};
 
+  private limits: AccumulatorLimits;
+
   constructor(ctx: Ctx) {
+    this.limits = { ...DEFAULT_ACCUMULATOR_LIMITS, ...(ctx.limits || {}) };
     if (ctx.sites) ctx.sites.forEach(s => { const k = normalizeSiteNumber(s.siteNumber); this.siteNameLookup[k] = s.siteName; this.siteEmrLookup[k] = s.emr || ''; });
     if (ctx.listings) ctx.listings.forEach(l => { if (l.ref) { this.listingTitleLookup[l.ref] = l.title || 'Untitled'; this.regionLookup[l.ref] = l.healthRegion || ''; } });
     if (ctx.users) ctx.users.forEach(u => { if (u.userName) this.userNameLookup[u.userName] = { name: u.name || '', clinicianType: u.clinicianType || '' }; });
+  }
+
+  private guard(field: string, size: number, limit: number): void {
+    if (size > limit) throw new AccumulatorCardinalityError(field, limit);
   }
 
   add(row: Row) {
@@ -61,7 +106,9 @@ export class ReferralAnalyticsAccumulator {
     const fd = formatDate(row.referralCreationDate);
     if (fd && fd.length >= 7) {
       const m = fd.substring(0, 7);
+      const wasNew = !(m in this.monthly);
       this.monthly[m] = (this.monthly[m] || 0) + 1;
+      if (wasNew) this.guard('monthly', Object.keys(this.monthly).length, this.limits.maxMonths);
     }
     if (fd && /^\d{4}-\d{2}-\d{2}$/.test(fd) && (!this.earliestDate || fd < this.earliestDate)) this.earliestDate = fd;
 
@@ -70,7 +117,7 @@ export class ReferralAnalyticsAccumulator {
       if (!isNaN(d.getTime())) {
         const day = d.getUTCDay(); const diff = d.getUTCDate() - day + (day === 0 ? -6 : 1);
         d.setUTCDate(diff); const wkKey = d.toISOString().slice(0, 10);
-        if (!this.weekly[wkKey]) this.weekly[wkKey] = { total: 0, test: 0, nonTest: 0, senders: new Set(), receivers: new Set() };
+        if (!this.weekly[wkKey]) { this.weekly[wkKey] = { total: 0, test: 0, nonTest: 0, senders: new Set(), receivers: new Set() }; this.guard('weekly', Object.keys(this.weekly).length, this.limits.maxWeeks); }
         this.weekly[wkKey].total++;
         const isTest = row.sentToTestListing === 'TRUE';
         if (isTest) this.weekly[wkKey].test++; else this.weekly[wkKey].nonTest++;
@@ -78,7 +125,7 @@ export class ReferralAnalyticsAccumulator {
       }
     }
 
-    if (!this.byTarget[tgtSite]) this.byTarget[tgtSite] = { siteName: this.siteNameLookup[tgtSite] || row.recipientName || tgtSite, totalRefs: 0, senders: new Set(), states: {}, listings: {} };
+    if (!this.byTarget[tgtSite]) { this.byTarget[tgtSite] = { siteName: this.siteNameLookup[tgtSite] || row.recipientName || tgtSite, totalRefs: 0, senders: new Set(), states: {}, listings: {} }; this.guard('byTarget', Object.keys(this.byTarget).length, this.limits.maxTargetSites); }
     this.byTarget[tgtSite].totalRefs++;
     if (row.referredByUserName) this.byTarget[tgtSite].senders.add(row.referredByUserName);
     const st = row.referralState || 'UNKNOWN'; this.byTarget[tgtSite].states[st] = (this.byTarget[tgtSite].states[st] || 0) + 1;
@@ -86,7 +133,7 @@ export class ReferralAnalyticsAccumulator {
     if (lref) { if (!this.byTarget[tgtSite].listings[lref]) this.byTarget[tgtSite].listings[lref] = { title: this.listingTitleLookup[lref] || row.recipientName || lref, count: 0 }; this.byTarget[tgtSite].listings[lref].count++; }
 
     if (srcSite) {
-      if (!this.bySource[srcSite]) this.bySource[srcSite] = { siteName: this.siteNameLookup[srcSite] || row.srcSiteName || srcSite, totalRefs: 0, targets: new Set(), users: new Set() };
+      if (!this.bySource[srcSite]) { this.bySource[srcSite] = { siteName: this.siteNameLookup[srcSite] || row.srcSiteName || srcSite, totalRefs: 0, targets: new Set(), users: new Set() }; this.guard('bySource', Object.keys(this.bySource).length, this.limits.maxSourceSites); }
       this.bySource[srcSite].totalRefs++; this.bySource[srcSite].targets.add(tgtSite); if (row.referredByUserName) this.bySource[srcSite].users.add(row.referredByUserName);
     }
 
@@ -98,7 +145,7 @@ export class ReferralAnalyticsAccumulator {
       if (row.referralTargetRef) this.unknownListings.add(row.referralTargetRef);
       if (srcSite) { if (!this.unknownSrcSites[srcSite]) this.unknownSrcSites[srcSite] = { name: srcName, count: 0 }; this.unknownSrcSites[srcSite].count++; }
     } else {
-      if (!this.bySender[un]) this.bySender[un] = { fullName: row.referredByUserFullName || this.userNameLookup[un]?.name || un, clinicianType: row.referrerClinicianType || this.userNameLookup[un]?.clinicianType || '', profId: row.referrerProfessionalId || '', totalRefs: 0, targets: new Set(), targetListings: new Set(), srcSites: {} };
+      if (!this.bySender[un]) { this.bySender[un] = { fullName: row.referredByUserFullName || this.userNameLookup[un]?.name || un, clinicianType: row.referrerClinicianType || this.userNameLookup[un]?.clinicianType || '', profId: row.referrerProfessionalId || '', totalRefs: 0, targets: new Set(), targetListings: new Set(), srcSites: {} }; this.guard('bySender', Object.keys(this.bySender).length, this.limits.maxSenders); }
       this.bySender[un].totalRefs++; this.bySender[un].targets.add(tgtSite); if (row.referralTargetRef) this.bySender[un].targetListings.add(row.referralTargetRef);
       if (!this.bySender[un].profId && row.referrerProfessionalId) this.bySender[un].profId = row.referrerProfessionalId;
       if (srcSite) { if (!this.bySender[un].srcSites[srcSite]) this.bySender[un].srcSites[srcSite] = { name: srcName, count: 0 }; this.bySender[un].srcSites[srcSite].count++; }
@@ -107,10 +154,10 @@ export class ReferralAnalyticsAccumulator {
     const tRef = row.referralTargetRef || '';
     let region = 'Referrals not mapped to listings';
     if (tRef && (tRef in this.regionLookup)) region = this.regionLookup[tRef] || 'Region not defined';
-    this.regionMap[region] = (this.regionMap[region] || 0) + 1;
-    const rn = row.raName || 'Unknown'; this.raNameMap[rn] = (this.raNameMap[rn] || 0) + 1;
-    const svc = row.currentHealthService || row.initialHealthService || 'Unknown'; this.serviceMap[svc] = (this.serviceMap[svc] || 0) + 1;
-    const ct = row.referrerClinicianType || 'Unknown'; this.clinTypeMap[ct] = (this.clinTypeMap[ct] || 0) + 1;
+    { const wasNew = !(region in this.regionMap); this.regionMap[region] = (this.regionMap[region] || 0) + 1; if (wasNew) this.guard('regionMap', Object.keys(this.regionMap).length, this.limits.maxRegions); }
+    const rn = row.raName || 'Unknown'; { const wasNew = !(rn in this.raNameMap); this.raNameMap[rn] = (this.raNameMap[rn] || 0) + 1; if (wasNew) this.guard('raNameMap', Object.keys(this.raNameMap).length, this.limits.maxRegions); }
+    const svc = row.currentHealthService || row.initialHealthService || 'Unknown'; { const wasNew = !(svc in this.serviceMap); this.serviceMap[svc] = (this.serviceMap[svc] || 0) + 1; if (wasNew) this.guard('serviceMap', Object.keys(this.serviceMap).length, this.limits.maxServices); }
+    const ct = row.referrerClinicianType || 'Unknown'; { const wasNew = !(ct in this.clinTypeMap); this.clinTypeMap[ct] = (this.clinTypeMap[ct] || 0) + 1; if (wasNew) this.guard('clinTypeMap', Object.keys(this.clinTypeMap).length, this.limits.maxClinTypes); }
     const srcEmr = this.siteEmrLookup[srcSite] || 'Unknown EMR'; const tgtEmr = this.siteEmrLookup[tgtSite] || 'Unknown EMR';
     this.emrSent[srcEmr] = (this.emrSent[srcEmr] || 0) + 1; this.emrRecv[tgtEmr] = (this.emrRecv[tgtEmr] || 0) + 1;
     const srcType = row.referralSource || 'Unknown'; this.sourceTypeMap[srcType] = (this.sourceTypeMap[srcType] || 0) + 1;
