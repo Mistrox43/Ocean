@@ -63,7 +63,7 @@ export class DuckDbRowStore {
 
     await runSql(`DROP TABLE IF EXISTS ${ident(table)}`);
     await runSql(
-      `CREATE TABLE ${ident(table)} AS SELECT ${selectExprs.join(', ')} FROM read_csv_auto(${sqlLit(fileName)}, header=true, all_varchar=true)`
+      `CREATE TABLE ${ident(table)} AS SELECT ${selectExprs.join(', ')} FROM read_csv_auto(${sqlLit(fileName)}, header=true)`
     );
 
     await dropFile(fileName);

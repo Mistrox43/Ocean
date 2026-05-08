@@ -20,7 +20,11 @@ async function createDb(): Promise<duckdb.AsyncDuckDB> {
   const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
   const db = new duckdb.AsyncDuckDB(logger, worker);
   await db.instantiate(bundle.mainModule, bundle.pthreadWorker);
-  await db.open({ query: { castBigIntToDouble: true, castTimestampToDate: true } });
+  await db.open({
+    path: 'opfs://analytics.duckdb',
+    accessMode: duckdb.DuckDBAccessMode.READ_WRITE,
+    query: { castBigIntToDouble: true, castTimestampToDate: true },
+  });
   return db;
 }
 
