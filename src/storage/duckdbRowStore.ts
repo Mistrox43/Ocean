@@ -1,5 +1,4 @@
 import { getConn, registerFileHandle, dropFile, runSql, queryRows } from './duckdbEngine';
-import type { RowStore } from './rowStore';
 
 const TABLE = (key: string) => `t_${key.replace(/[^a-zA-Z0-9_]/g, '_')}`;
 
@@ -11,7 +10,7 @@ function ident(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-export class DuckDbRowStore implements RowStore {
+export class DuckDbRowStore {
   private key = '';
   private rowCount = 0;
   private columns: string[] = [];

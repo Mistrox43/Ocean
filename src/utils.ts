@@ -2,7 +2,7 @@ import * as XLSX from 'xlsx';
 import React from 'react';
 import type { ParseResult } from './types';
 import { COLORS } from './constants';
-import { createRowStore } from './storage/rowStore';
+import { DuckDbRowStore } from './storage/duckdbRowStore';
 
 /**
  * Calculate a percentage with one decimal place precision.
@@ -97,7 +97,7 @@ export function exportToExcel(data: Record<string, string | number | boolean>[],
  */
 export async function exportToCSVStream(storageKey: string, filename: string): Promise<void> {
   try {
-    const store = await createRowStore();
+    const store = new DuckDbRowStore();
     await store.open(storageKey);
     let headers: string[] | null = null;
     const esc = (v: string) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
