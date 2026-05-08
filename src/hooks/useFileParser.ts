@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { HeaderDiag, ReferralAnalytics } from '@/types';
-import FileParserWorker from '@/workers/file-parser.worker?worker&inline';
+import FileParserWorker from '@/workers/file-parser.worker?worker';
 
 const LARGE_FILE_BYTES = 50 * 1024 * 1024;
 

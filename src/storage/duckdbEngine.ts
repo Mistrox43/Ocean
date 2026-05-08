@@ -7,10 +7,14 @@ import ehWasm from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url';
 let dbPromise: Promise<duckdb.AsyncDuckDB> | null = null;
 let connPromise: Promise<duckdb.AsyncDuckDBConnection> | null = null;
 
+function abs(u: string): string {
+  return new URL(u, self.location.href).href;
+}
+
 async function createDb(): Promise<duckdb.AsyncDuckDB> {
   const bundle = await duckdb.selectBundle({
-    mvp: { mainModule: mvpWasm, mainWorker: mvpWorker },
-    eh: { mainModule: ehWasm, mainWorker: ehWorker },
+    mvp: { mainModule: abs(mvpWasm), mainWorker: abs(mvpWorker) },
+    eh: { mainModule: abs(ehWasm), mainWorker: abs(ehWorker) },
   });
   const worker = new Worker(bundle.mainWorker!, { type: 'module' });
   const logger = new duckdb.ConsoleLogger(duckdb.LogLevel.WARNING);
