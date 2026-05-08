@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 import * as XLSX from 'xlsx';
 import type { HeaderDiag, IntakeAnalytics, ReferralAnalytics } from '@/types';
-import { createRowStore, type RowStore } from '@/storage/rowStore';
+import { createRowStore, type RowLocation, type RowStore } from '@/storage/rowStore';
 import { ReferralAnalyticsAccumulator } from '@/lib/referralAnalyticsAccumulator';
 import { formatDate } from '@/utils';
 
@@ -49,6 +49,23 @@ let cachedStorageKey = '';
 let baseAnalytics: ReferralAnalytics | null = null;
 let baseIntakeAnalytics: IntakeAnalytics | null = null;
 let activeFilterRequestId = 0;
+// In-memory index built at ingest: initialReferralTargetRef → row locations.
+// Lost on worker termination; rebuilt on next ingest.
+let initialRefIndex: Map<string, RowLocation[]> | null = null;
+
+const indexLocations = (rows: Record<string, string>[], locs: RowLocation[]) => {
+  if (!initialRefIndex) return;
+  for (let i = 0; i < rows.length; i++) {
+    const ref = rows[i].initialReferralTargetRef;
+    if (!ref) continue;
+    let bucket = initialRefIndex.get(ref);
+    if (!bucket) {
+      bucket = [];
+      initialRefIndex.set(ref, bucket);
+    }
+    bucket.push(locs[i]);
+  }
+};
 
 const noFilters = (includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined) =>
   includeTest && regionRefs.length === 0 && (!initialTargetRefs || !initialTargetRefs.length) && (!raNames || !raNames.length);
@@ -60,6 +77,7 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
   cachedStorageKey = storageKey;
   baseAnalytics = null;
   baseIntakeAnalytics = null;
+  initialRefIndex = new Map();
   const reader = file.stream().getReader();
   const decoder = new TextDecoder();
   let carry = '';
@@ -172,7 +190,8 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
     }
     carry = '';
     if (appendBuffer.length >= 20000) {
-      await store.appendBatch(appendBuffer);
+      const locs = await store.appendBatch(appendBuffer);
+      indexLocations(appendBuffer, locs);
       appendBuffer = [];
     }
     const totalIssues = mismatchedRows + missingRequiredRows;
@@ -189,7 +208,10 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
     rowParts.push(field);
     processParts(rowParts);
   }
-  if (appendBuffer.length) await store.appendBatch(appendBuffer);
+  if (appendBuffer.length) {
+    const locs = await store.appendBatch(appendBuffer);
+    indexLocations(appendBuffer, locs);
+  }
   await store.finalizeAppend();
 
   const hdrs = (headersRaw || []) as string[];
@@ -249,14 +271,36 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
   const initialTargetSet = initialTargetRefs?.length ? new Set(initialTargetRefs) : null;
   const raNameSet = raNames?.length ? new Set(raNames) : null;
   const acc = new ReferralAnalyticsAccumulator(ctx);
-  for await (const batch of store.streamRead(50000)) {
-    if (activeFilterRequestId !== requestId) return;
-    for (const row of batch) {
-      if (!includeTest && row.sentToTestListing === 'TRUE') continue;
-      if (refSet && !refSet.has(row.referralTargetRef)) continue;
-      if (initialTargetSet && !initialTargetSet.has(row.initialReferralTargetRef)) continue;
-      if (raNameSet && !raNameSet.has(row.raName)) continue;
-      acc.add(row);
+
+  // Fast path: when the Initial Target filter is set and we have an in-memory
+  // index from this session's ingest, only read locations matching the
+  // selected refs. ~40× less I/O when 5 of 200 refs are selected.
+  const useFastPath = initialTargetSet && initialRefIndex && initialRefIndex.size > 0;
+  if (useFastPath) {
+    const locs: RowLocation[] = [];
+    for (const ref of initialTargetSet) {
+      const fromIndex = initialRefIndex!.get(ref);
+      if (fromIndex) for (const l of fromIndex) locs.push(l);
+    }
+    for await (const batch of store.readByLocations(locs, 50000)) {
+      if (activeFilterRequestId !== requestId) return;
+      for (const row of batch) {
+        if (!includeTest && row.sentToTestListing === 'TRUE') continue;
+        if (refSet && !refSet.has(row.referralTargetRef)) continue;
+        if (raNameSet && !raNameSet.has(row.raName)) continue;
+        acc.add(row);
+      }
+    }
+  } else {
+    for await (const batch of store.streamRead(50000)) {
+      if (activeFilterRequestId !== requestId) return;
+      for (const row of batch) {
+        if (!includeTest && row.sentToTestListing === 'TRUE') continue;
+        if (refSet && !refSet.has(row.referralTargetRef)) continue;
+        if (initialTargetSet && !initialTargetSet.has(row.initialReferralTargetRef)) continue;
+        if (raNameSet && !raNameSet.has(row.raName)) continue;
+        acc.add(row);
+      }
     }
   }
   if (activeFilterRequestId !== requestId) return;
@@ -303,6 +347,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       cachedStorageKey = msg.storageKey;
       baseAnalytics = null;
       baseIntakeAnalytics = null;
+      initialRefIndex = new Map();
       postProgress(msg.requestId, 0, 100, 'Reading workbook...');
       const wb = XLSX.read(msg.buffer, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
@@ -329,11 +374,15 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         acc.add(mapped);
         batch.push(mapped);
         if (batch.length >= 20000) {
-          await store.appendBatch(batch);
+          const locs = await store.appendBatch(batch);
+          indexLocations(batch, locs);
           batch = [];
         }
       }
-      if (batch.length) await store.appendBatch(batch);
+      if (batch.length) {
+        const locs = await store.appendBatch(batch);
+        indexLocations(batch, locs);
+      }
       await store.finalizeAppend();
       postProgress(msg.requestId, 100, 100, 'Completed');
       const { referral: analytics, intake: intakeAnalytics } = acc.finalize();
