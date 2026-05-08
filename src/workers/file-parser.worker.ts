@@ -1,7 +1,8 @@
 /// <reference lib="webworker" />
 import * as XLSX from 'xlsx';
 import type { HeaderDiag, ReferralAnalytics } from '@/types';
-import { createRowStore, type RowStore } from '@/storage/rowStore';
+import { DuckDbRowStore } from '@/storage/duckdbRowStore';
+import { getConn } from '@/storage/duckdbEngine';
 import { ReferralAnalyticsAccumulator } from '@/lib/referralAnalyticsAccumulator';
 import { formatDate } from '@/utils';
 
@@ -39,166 +40,92 @@ const postProgress = (requestId: number, processed: number, total: number, stage
   self.postMessage(message);
 };
 
-let rowStore: RowStore | null = null;
-const getStore = async () => {
-  if (!rowStore) rowStore = await createRowStore();
-  return rowStore;
-};
-
+const rowStore = new DuckDbRowStore();
 let cachedStorageKey = '';
 let baseAnalytics: ReferralAnalytics | null = null;
+
+function sqlLit(v: string): string {
+  return `'${v.replace(/'/g, "''")}'`;
+}
+
+function ident(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
 
 const noFilters = (includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined) =>
   includeTest && regionRefs.length === 0 && (!initialTargetRefs || !initialTargetRefs.length) && (!raNames || !raNames.length);
 
-const processCsvStreaming = async (requestId: number, file: File, map: Record<string, string>, storageKey: string, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null, ingestRoute: 'auto' | 'small' | 'large') => {
-  const store = await getStore();
-  await store.open(storageKey);
-  await store.clear(storageKey);
+const processCsvStreaming = async (
+  requestId: number,
+  file: File,
+  map: Record<string, string>,
+  storageKey: string,
+  sites: Record<string, string>[] | null,
+  listings: Record<string, string>[] | null,
+  users: Record<string, string>[] | null,
+  ingestRoute: 'auto' | 'small' | 'large',
+) => {
+  postProgress(requestId, 0, file.size, 'Ingesting CSV into DuckDB...');
+  await rowStore.open(storageKey);
+  await rowStore.clear(storageKey);
   cachedStorageKey = storageKey;
   baseAnalytics = null;
-  const reader = file.stream().getReader();
-  const decoder = new TextDecoder();
-  let carry = '';
-  let processedBytes = 0;
-  let headersRaw: string[] | null = null;
-  let firstDataRow: string[] | null = null;
-  let appendBuffer: Record<string, string>[] = [];
-  const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
-  const required = ['referralCreationDate', 'referralRef', 'referralTargetRef'];
-  let mismatchedRows = 0;
+
+  await rowStore.ingestCsvFile(file, map);
+  postProgress(requestId, Math.floor(file.size * 0.6), file.size, 'Normalizing data...');
+
+  const table = rowStore.getTableName();
+  const columns = rowStore.getColumns();
+  const conn = await getConn();
+
+  if (columns.includes('referralCreationDate')) {
+    await conn.query(
+      `UPDATE ${ident(table)} SET ${ident('referralCreationDate')} = COALESCE(TRY_STRFTIME(TRY_CAST(${ident('referralCreationDate')} AS TIMESTAMP), '%Y-%m-%d'), ${ident('referralCreationDate')})`
+    );
+  }
+
+  const required = ['referralCreationDate', 'referralRef', 'referralTargetRef'].filter(k => columns.includes(k));
   let missingRequiredRows = 0;
   let invalidDateRows = 0;
-  const omittedSamples: Array<{
-    reasonCode: 'MISMATCHED_FIELD_COUNT' | 'MISSING_REQUIRED';
-    lineNumber: number;
-    referralRef: string;
-    referralCreationDate: string;
-    rawPreview: string;
-    parsedFieldCount: number;
-    expectedFieldCount: number;
-  }> = [];
-  const omittedSampleLimit = 100;
-  const corruptionThreshold = 0.02;
-  let totalParsedRows = 0;
 
-  let inQuotes = false;
-  let field = '';
-  let rowParts: string[] = [];
-  let lastProgressBytes = 0;
-  const processParts = (parts: string[]) => {
-    if (!parts.length || (parts.length === 1 && !parts[0].trim())) return;
-    if (!headersRaw) {
-      headersRaw = parts.map(p => p.trim());
-      return;
-    }
-    totalParsedRows++;
-    if (parts.length !== headersRaw.length) {
-      mismatchedRows++;
-      if (omittedSamples.length < omittedSampleLimit) {
-        const referralRefHeaderIndex = headersRaw.findIndex(h => mapHeader(h, map) === 'referralRef');
-        const referralCreationDateHeaderIndex = headersRaw.findIndex(h => mapHeader(h, map) === 'referralCreationDate');
-        omittedSamples.push({
-          reasonCode: 'MISMATCHED_FIELD_COUNT',
-          lineNumber: totalParsedRows + 1,
-          referralRef: referralRefHeaderIndex >= 0 ? normalize(parts[referralRefHeaderIndex] ?? '') : '',
-          referralCreationDate: referralCreationDateHeaderIndex >= 0 ? normalize(parts[referralCreationDateHeaderIndex] ?? '') : '',
-          rawPreview: parts.join(',').slice(0, 220),
-          parsedFieldCount: parts.length,
-          expectedFieldCount: headersRaw.length,
-        });
-      }
-      return;
-    }
-    if (!firstDataRow) firstDataRow = parts;
-    const row: Record<string, string> = {};
-    for (let i = 0; i < headersRaw.length; i++) row[mapHeader(headersRaw[i], map)] = normalize(parts[i] ?? '');
-    const missingRequired = required.some(k => !row[k]);
-    if (missingRequired) {
-      missingRequiredRows++;
-      if (omittedSamples.length < omittedSampleLimit) {
-        omittedSamples.push({
-          reasonCode: 'MISSING_REQUIRED',
-          lineNumber: totalParsedRows + 1,
-          referralRef: row.referralRef || '',
-          referralCreationDate: row.referralCreationDate || '',
-          rawPreview: parts.join(',').slice(0, 220),
-          parsedFieldCount: parts.length,
-          expectedFieldCount: headersRaw.length,
-        });
-      }
-      return;
-    }
-    const d = formatDate(row.referralCreationDate || '');
-    if (!d || !/^\d{4}-\d{2}-\d{2}$/.test(d)) invalidDateRows++;
-    row.referralCreationDate = d;
-    acc.add(row);
-    appendBuffer.push(row);
-  };
-
-  postProgress(requestId, 0, file.size, 'Reading CSV...');
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-
-    processedBytes += value.length;
-    carry += decoder.decode(value, { stream: true });
-    for (let i = 0; i < carry.length; i++) {
-      const c = carry[i];
-      if (c === '"') {
-        if (inQuotes && carry[i + 1] === '"') {
-          field += '"';
-          i++;
-        } else {
-          inQuotes = !inQuotes;
-        }
-      } else if (c === ',' && !inQuotes) {
-        rowParts.push(field);
-        field = '';
-      } else if ((c === '\n' || c === '\r') && !inQuotes) {
-        if (c === '\r' && carry[i + 1] === '\n') i++;
-        rowParts.push(field);
-        field = '';
-        processParts(rowParts);
-        rowParts = [];
-      } else {
-        field += c;
-      }
-    }
-    carry = '';
-    if (appendBuffer.length >= 20000) {
-      await store.appendBatch(appendBuffer);
-      appendBuffer = [];
-    }
-    const totalIssues = mismatchedRows + missingRequiredRows;
-    if (totalParsedRows > 1000 && totalIssues / totalParsedRows > corruptionThreshold) throw new Error(`Large CSV parse validation failed (mismatch=${mismatchedRows}, missingRequired=${missingRequiredRows}, invalidDate=${invalidDateRows}). Try the small parser path for comparison.`);
-    if (processedBytes - lastProgressBytes >= 1024 * 1024) {
-      lastProgressBytes = processedBytes;
-      postProgress(requestId, processedBytes, file.size, 'Parsing CSV rows...');
+  if (required.length) {
+    const missingClause = required.map(k => `(${ident(k)} IS NULL OR ${ident(k)} = '')`).join(' OR ');
+    const res = await conn.query(`SELECT COUNT(*)::BIGINT AS n FROM ${ident(table)} WHERE ${missingClause}`);
+    missingRequiredRows = Number((res.toArray()[0] as { toJSON: () => { n: number } }).toJSON().n || 0);
+    if (missingRequiredRows > 0) {
+      await conn.query(`DELETE FROM ${ident(table)} WHERE ${missingClause}`);
     }
   }
 
-  const finalChunk = decoder.decode();
-  if (finalChunk) field += finalChunk;
-  if (field.length > 0 || rowParts.length > 0) {
-    rowParts.push(field);
-    processParts(rowParts);
+  if (columns.includes('referralCreationDate')) {
+    const res = await conn.query(
+      `SELECT COUNT(*)::BIGINT AS n FROM ${ident(table)} WHERE NOT regexp_matches(${ident('referralCreationDate')}, '^\\d{4}-\\d{2}-\\d{2}$')`
+    );
+    invalidDateRows = Number((res.toArray()[0] as { toJSON: () => { n: number } }).toJSON().n || 0);
   }
-  if (appendBuffer.length) await store.appendBatch(appendBuffer);
-  await store.finalizeAppend();
 
-  const hdrs = (headersRaw || []) as string[];
-  const headerDiag: HeaderDiag[] = hdrs.map((h, i) => ({
-    raw: h,
-    mapped: mapHeader(h, map),
-    inMap: !!(map[h] || map[h.toLowerCase()]),
-    sample: normalize(firstDataRow?.[i] ?? '').slice(0, 60),
-  }));
+  const cntRes = await conn.query(`SELECT COUNT(*)::BIGINT AS n FROM ${ident(table)}`);
+  const acceptedRows = Number((cntRes.toArray()[0] as { toJSON: () => { n: number } }).toJSON().n || 0);
+  (rowStore as unknown as { rowCount: number }).rowCount = acceptedRows;
 
+  postProgress(requestId, Math.floor(file.size * 0.8), file.size, 'Computing analytics...');
+  const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
+  for await (const batch of rowStore.streamRead(50000)) {
+    for (const row of batch) acc.add(row);
+  }
   const analytics = acc.finalize();
   baseAnalytics = analytics;
+
+  const sampleRes = await conn.query(`SELECT * FROM ${ident(table)} LIMIT 1`);
+  const sampleRow = sampleRes.toArray()[0] as { toJSON: () => Record<string, unknown> } | undefined;
+  const sample = sampleRow ? sampleRow.toJSON() : {};
+  const headerDiag: HeaderDiag[] = columns.map(c => ({
+    raw: c,
+    mapped: c,
+    inMap: true,
+    sample: normalize(sample[c]).slice(0, 60),
+  }));
+
   postProgress(requestId, file.size, file.size, 'Completed');
   self.postMessage({
     type: 'complete',
@@ -208,26 +135,114 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
     metadata: {
       parser: 'csv-stream',
       ingestRoute,
-      rowCount: store.getRowCount(),
+      rowCount: acceptedRows,
       fileName: file.name,
       fileSize: file.size,
-      storageEngine: store.getEngine(),
+      storageEngine: 'opfs',
       storageKey,
       diagnostics: {
-        sourceRows: totalParsedRows,
-        acceptedRows: store.getRowCount(),
-        omittedRows: mismatchedRows + missingRequiredRows,
-        mismatchedRows,
+        sourceRows: acceptedRows + missingRequiredRows,
+        acceptedRows,
+        omittedRows: missingRequiredRows,
+        mismatchedRows: 0,
         missingRequiredRows,
         invalidDateRows,
-        omittedSamples,
+        omittedSamples: [],
       },
       paritySignature: `${analytics.total}|${analytics.distinctRefs}|${analytics.timeline.length}|${analytics.weekly.length}`,
     },
   });
 };
 
-const filterFromStore = async (requestId: number, storageKey: string, includeTest: boolean, regionRefs: string[] = [], initialTargetRefs: string[] | undefined, raNames: string[] | undefined, sites: Record<string, string>[] | null, listings: Record<string, string>[] | null, users: Record<string, string>[] | null) => {
+const processXlsxSmall = async (
+  requestId: number,
+  buffer: ArrayBuffer,
+  map: Record<string, string>,
+  fileName: string,
+  fileSize: number,
+  storageKey: string,
+  sites: Record<string, string>[] | null,
+  listings: Record<string, string>[] | null,
+  users: Record<string, string>[] | null,
+  ingestRoute: 'auto' | 'small' | 'large',
+) => {
+  await rowStore.open(storageKey);
+  await rowStore.clear(storageKey);
+  cachedStorageKey = storageKey;
+  baseAnalytics = null;
+
+  postProgress(requestId, 0, 100, 'Reading workbook...');
+  const wb = XLSX.read(buffer, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  postProgress(requestId, 35, 100, 'Converting sheet to rows...');
+  const raw: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
+  const headerDiag: HeaderDiag[] = [];
+  if (raw.length > 0) {
+    for (const k of Object.keys(raw[0])) {
+      headerDiag.push({
+        raw: k,
+        mapped: mapHeader(k, map),
+        inMap: !!(map[k] || map[k.toLowerCase()]),
+        sample: normalize(raw[0][k]).slice(0, 60),
+      });
+    }
+  }
+  postProgress(requestId, 55, 100, 'Mapping fields...');
+  const mapped: Record<string, string>[] = new Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    const src = raw[i];
+    const out: Record<string, string> = {};
+    for (const k in src) out[mapHeader(k, map)] = normalize(src[k]);
+    if (out.referralCreationDate) out.referralCreationDate = formatDate(out.referralCreationDate) || out.referralCreationDate;
+    mapped[i] = out;
+  }
+
+  postProgress(requestId, 75, 100, 'Storing rows in DuckDB...');
+  await rowStore.createFromRows(mapped);
+
+  postProgress(requestId, 90, 100, 'Computing analytics...');
+  const acc = new ReferralAnalyticsAccumulator({ sites, listings, users });
+  for (const row of mapped) acc.add(row);
+  const analytics = acc.finalize();
+  baseAnalytics = analytics;
+
+  postProgress(requestId, 100, 100, 'Completed');
+  self.postMessage({
+    type: 'complete',
+    requestId,
+    headerDiag,
+    analytics,
+    metadata: {
+      parser: 'xlsx-worker',
+      ingestRoute,
+      rowCount: rowStore.getRowCount(),
+      fileName,
+      fileSize,
+      storageEngine: 'opfs',
+      storageKey,
+      diagnostics: {
+        sourceRows: raw.length,
+        acceptedRows: rowStore.getRowCount(),
+        omittedRows: 0,
+        mismatchedRows: 0,
+        missingRequiredRows: 0,
+        invalidDateRows: 0,
+      },
+    },
+  });
+};
+
+const filterFromStore = async (
+  requestId: number,
+  storageKey: string,
+  includeTest: boolean,
+  regionRefs: string[] = [],
+  initialTargetRefs: string[] | undefined,
+  raNames: string[] | undefined,
+  sites: Record<string, string>[] | null,
+  listings: Record<string, string>[] | null,
+  users: Record<string, string>[] | null,
+) => {
   const ctx: Ctx = { sites, listings, users };
   const noFilter = noFilters(includeTest, regionRefs, initialTargetRefs, raNames);
 
@@ -236,20 +251,33 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
     return;
   }
 
-  const store = await getStore();
-  await store.open(storageKey);
-  const refSet = regionRefs.length ? new Set(regionRefs) : null;
-  const initialTargetSet = initialTargetRefs?.length ? new Set(initialTargetRefs) : null;
-  const raNameSet = raNames?.length ? new Set(raNames) : null;
+  await rowStore.open(storageKey);
+  cachedStorageKey = storageKey;
+
+  const columns = new Set(rowStore.getColumns());
+  const clauses: string[] = [];
+
+  if (!includeTest && columns.has('sentToTestListing')) {
+    clauses.push(`(${ident('sentToTestListing')} IS NULL OR ${ident('sentToTestListing')} <> 'TRUE')`);
+  }
+  if (regionRefs.length && columns.has('referralTargetRef')) {
+    const list = regionRefs.map(sqlLit).join(',');
+    clauses.push(`${ident('referralTargetRef')} IN (${list})`);
+  }
+  if (initialTargetRefs?.length && columns.has('initialReferralTargetRef')) {
+    const list = initialTargetRefs.map(sqlLit).join(',');
+    clauses.push(`${ident('initialReferralTargetRef')} IN (${list})`);
+  }
+  if (raNames?.length && columns.has('raName')) {
+    const list = raNames.map(sqlLit).join(',');
+    clauses.push(`${ident('raName')} IN (${list})`);
+  }
+
+  const whereClause = clauses.join(' AND ');
   const acc = new ReferralAnalyticsAccumulator(ctx);
-  for await (const batch of store.streamRead(50000)) {
-    for (const row of batch) {
-      if (!includeTest && row.sentToTestListing === 'TRUE') continue;
-      if (refSet && !refSet.has(row.referralTargetRef)) continue;
-      if (initialTargetSet && !initialTargetSet.has(row.initialReferralTargetRef)) continue;
-      if (raNameSet && !raNameSet.has(row.raName)) continue;
-      acc.add(row);
-    }
+  const iterator = await rowStore.streamReadFiltered(50000, whereClause);
+  for await (const batch of iterator) {
+    for (const row of batch) acc.add(row);
   }
   const analytics = acc.finalize();
   if (noFilter) baseAnalytics = analytics;
@@ -285,69 +313,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       return;
     }
     if (msg.type === 'parse-small') {
-      const store = await getStore();
-      await store.open(msg.storageKey);
-      await store.clear(msg.storageKey);
-      cachedStorageKey = msg.storageKey;
-      baseAnalytics = null;
-      postProgress(msg.requestId, 0, 100, 'Reading workbook...');
-      const wb = XLSX.read(msg.buffer, { type: 'array' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      postProgress(msg.requestId, 35, 100, 'Converting sheet to rows...');
-      const raw: Record<string, unknown>[] = XLSX.utils.sheet_to_json(ws, { defval: '' });
-      const headerDiag: HeaderDiag[] = [];
-      if (raw.length > 0) {
-        for (const k of Object.keys(raw[0])) {
-          headerDiag.push({
-            raw: k,
-            mapped: mapHeader(k, msg.map),
-            inMap: !!(msg.map[k] || msg.map[k.toLowerCase()]),
-            sample: normalize(raw[0][k]).slice(0, 60),
-          });
-        }
-      }
-      postProgress(msg.requestId, 70, 100, 'Mapping fields...');
-      const acc = new ReferralAnalyticsAccumulator({ sites: msg.sites, listings: msg.listings, users: msg.users });
-      let batch: Record<string, string>[] = [];
-      for (let i = 0; i < raw.length; i++) {
-        const src = raw[i];
-        const mapped: Record<string, string> = {};
-        for (const k in src) mapped[mapHeader(k, msg.map)] = normalize(src[k]);
-        acc.add(mapped);
-        batch.push(mapped);
-        if (batch.length >= 20000) {
-          await store.appendBatch(batch);
-          batch = [];
-        }
-      }
-      if (batch.length) await store.appendBatch(batch);
-      await store.finalizeAppend();
-      postProgress(msg.requestId, 100, 100, 'Completed');
-      const analytics = acc.finalize();
-      baseAnalytics = analytics;
-      self.postMessage({
-        type: 'complete',
-        requestId: msg.requestId,
-        headerDiag,
-        analytics,
-        metadata: {
-          parser: 'xlsx-worker',
-          ingestRoute: msg.ingestRoute,
-          rowCount: store.getRowCount(),
-          fileName: msg.fileName,
-          fileSize: msg.fileSize,
-          storageEngine: store.getEngine(),
-          storageKey: msg.storageKey,
-          diagnostics: {
-            sourceRows: raw.length,
-            acceptedRows: store.getRowCount(),
-            omittedRows: 0,
-            mismatchedRows: 0,
-            missingRequiredRows: 0,
-            invalidDateRows: 0,
-          },
-        },
-      });
+      await processXlsxSmall(msg.requestId, msg.buffer, msg.map, msg.fileName, msg.fileSize, msg.storageKey, msg.sites, msg.listings, msg.users, msg.ingestRoute);
       return;
     }
     if (msg.type === 'parse-csv-stream') {
