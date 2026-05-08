@@ -53,6 +53,42 @@ let activeFilterRequestId = 0;
 // Lost on worker termination; rebuilt on next ingest.
 let initialRefIndex: Map<string, RowLocation[]> | null = null;
 
+// Tiny LRU cache (4 entries) of recent filter results. Keyed by the JSON of
+// the filter combo + storageKey. Toggling between recently-used filters
+// becomes instant.
+type CachedResult = { analytics: ReferralAnalytics; intakeAnalytics: IntakeAnalytics };
+const FILTER_CACHE_SIZE = 4;
+const filterCache = new Map<string, CachedResult>();
+
+const filterCacheKey = (storageKey: string, includeTest: boolean, regionRefs: string[], initialTargetRefs: string[] | undefined, raNames: string[] | undefined): string => {
+  return JSON.stringify({
+    s: storageKey,
+    t: includeTest,
+    r: [...regionRefs].sort(),
+    i: initialTargetRefs ? [...initialTargetRefs].sort() : null,
+    n: raNames ? [...raNames].sort() : null,
+  });
+};
+
+const filterCacheGet = (key: string): CachedResult | undefined => {
+  const hit = filterCache.get(key);
+  if (!hit) return undefined;
+  // touch: move to most-recently-used position
+  filterCache.delete(key);
+  filterCache.set(key, hit);
+  return hit;
+};
+
+const filterCachePut = (key: string, value: CachedResult) => {
+  if (filterCache.has(key)) filterCache.delete(key);
+  filterCache.set(key, value);
+  while (filterCache.size > FILTER_CACHE_SIZE) {
+    const oldest = filterCache.keys().next().value;
+    if (oldest === undefined) break;
+    filterCache.delete(oldest);
+  }
+};
+
 const indexLocations = (rows: Record<string, string>[], locs: RowLocation[]) => {
   if (!initialRefIndex) return;
   for (let i = 0; i < rows.length; i++) {
@@ -78,6 +114,7 @@ const processCsvStreaming = async (requestId: number, file: File, map: Record<st
   baseAnalytics = null;
   baseIntakeAnalytics = null;
   initialRefIndex = new Map();
+  filterCache.clear();
   const reader = file.stream().getReader();
   const decoder = new TextDecoder();
   let carry = '';
@@ -264,6 +301,13 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
     return;
   }
 
+  const cacheKey = filterCacheKey(storageKey, includeTest, regionRefs, initialTargetRefs, raNames);
+  const cached = filterCacheGet(cacheKey);
+  if (cached) {
+    self.postMessage({ type: 'filtered', requestId, analytics: cached.analytics, intakeAnalytics: cached.intakeAnalytics });
+    return;
+  }
+
   const store = await getStore();
   await store.open(storageKey);
   if (activeFilterRequestId !== requestId) return;
@@ -309,6 +353,7 @@ const filterFromStore = async (requestId: number, storageKey: string, includeTes
     baseAnalytics = analytics;
     baseIntakeAnalytics = intakeAnalytics;
   }
+  filterCachePut(cacheKey, { analytics, intakeAnalytics });
   self.postMessage({ type: 'filtered', requestId, analytics, intakeAnalytics });
 };
 
@@ -348,6 +393,7 @@ self.onmessage = async (event: MessageEvent<WorkerRequest>) => {
       baseAnalytics = null;
       baseIntakeAnalytics = null;
       initialRefIndex = new Map();
+      filterCache.clear();
       postProgress(msg.requestId, 0, 100, 'Reading workbook...');
       const wb = XLSX.read(msg.buffer, { type: 'array' });
       const ws = wb.Sheets[wb.SheetNames[0]];
