@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { HeaderDiag, ReferralAnalytics } from '@/types';
+import type { HeaderDiag, IntakeAnalytics, ReferralAnalytics } from '@/types';
 import FileParserWorker from '@/workers/file-parser.worker?worker&inline';
 
 const LARGE_FILE_BYTES = 50 * 1024 * 1024;
@@ -36,8 +36,8 @@ export type IngestMetadata = {
 
 type WorkerMessage =
   | { type: 'progress'; requestId: number; processed: number; total: number; pct: number; stage: string }
-  | { type: 'complete'; requestId: number; headerDiag: HeaderDiag[]; metadata: IngestMetadata; analytics: ReferralAnalytics | null }
-  | { type: 'filtered'; requestId: number; analytics: ReferralAnalytics | null }
+  | { type: 'complete'; requestId: number; headerDiag: HeaderDiag[]; metadata: IngestMetadata; analytics: ReferralAnalytics | null; intakeAnalytics: IntakeAnalytics | null }
+  | { type: 'filtered'; requestId: number; analytics: ReferralAnalytics | null; intakeAnalytics: IntakeAnalytics | null }
   | { type: 'error'; requestId: number; error: string };
 
 export function useFileParser() {
@@ -49,6 +49,7 @@ export function useFileParser() {
   const [progress, setProgress] = useState<ParseProgress | null>(null);
   const [metadata, setMetadata] = useState<IngestMetadata | null>(null);
   const [analytics, setAnalytics] = useState<ReferralAnalytics | null>(null);
+  const [intakeAnalytics, setIntakeAnalytics] = useState<IntakeAnalytics | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -66,6 +67,7 @@ export function useFileParser() {
     setProgress(null);
     setMetadata(null);
     setAnalytics(null);
+    setIntakeAnalytics(null);
     setError(null);
     setIsLoading(false);
   }, [destroyWorker]);
@@ -100,6 +102,7 @@ export function useFileParser() {
       setHeaderDiag(null);
       setMetadata(null);
       setAnalytics(null);
+      setIntakeAnalytics(null);
       setError(null);
       setProgress({ processed: 0, total: file.size, pct: 0, stage: 'Preparing ingest...' });
       setIsLoading(true);
@@ -120,6 +123,7 @@ export function useFileParser() {
         if (msg.type === 'filtered') {
           if (msg.requestId !== filterRequestIdRef.current) return;
           setAnalytics(msg.analytics);
+          setIntakeAnalytics(msg.intakeAnalytics);
           setIsLoading(false);
           return;
         }
@@ -127,6 +131,7 @@ export function useFileParser() {
         setHeaderDiag(msg.headerDiag);
         setMetadata(msg.metadata);
         setAnalytics(msg.analytics);
+        setIntakeAnalytics(msg.intakeAnalytics);
         setProgress({ processed: msg.metadata.fileSize, total: msg.metadata.fileSize, pct: 100, stage: 'Completed' });
         setIsLoading(false);
       };
@@ -158,5 +163,5 @@ export function useFileParser() {
 
   useEffect(() => () => destroyWorker(), [destroyWorker]);
 
-  return { ingest, recomputeFromStore, progress, metadata, headerDiag, analytics, error, isLoading, reset };
+  return { ingest, recomputeFromStore, progress, metadata, headerDiag, analytics, intakeAnalytics, error, isLoading, reset };
 }

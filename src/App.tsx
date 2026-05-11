@@ -17,6 +17,7 @@ import { useReferralAnalytics } from './hooks/useReferralAnalytics';
 import { useFileParser, type IngestRoute } from './hooks/useFileParser';
 import { useTabularParser } from './hooks/useTabularParser';
 import { MultiSelectCombobox } from './components/MultiSelectCombobox';
+import { CentralIntakeTab } from './components/intake/CentralIntakeTab';
 import type { HeaderDiag } from './types';
 
 export default function App() {
@@ -146,14 +147,17 @@ export default function App() {
       lastIngestSigRef.current = sig;
       return;
     }
-    referralParser.recomputeFromStore(
-      storageKey,
-      includeTest,
-      regionListingRefs ? [...regionListingRefs] : [],
-      referralInitialTargetFilter.length ? referralInitialTargetFilter : undefined,
-      selectedRaNames.length ? selectedRaNames : undefined,
-      { sites, listings, users },
-    );
+    const handle = setTimeout(() => {
+      referralParser.recomputeFromStore(
+        storageKey,
+        includeTest,
+        regionListingRefs ? [...regionListingRefs] : [],
+        referralInitialTargetFilter.length ? referralInitialTargetFilter : undefined,
+        selectedRaNames.length ? selectedRaNames : undefined,
+        { sites, listings, users },
+      );
+    }, 300);
+    return () => clearTimeout(handle);
   }, [referralParser.metadata?.storageKey, referralParser.metadata?.paritySignature, referralParser.recomputeFromStore, includeTest, regionListingRefs, referralInitialTargetFilter, selectedRaNames, sites, listings, users]);
   const referralAnalytics = useReferralAnalytics(null, null, sites, listings, users, referralParser.analytics);
   const referralIngestDiag = referralParser.metadata?.diagnostics;
@@ -221,6 +225,7 @@ export default function App() {
             </SelectContent>
           </Select>}
           {uniqueRaNames.length>0&&<MultiSelectCombobox options={uniqueRaNames.map(n=>({ref:n,title:n}))} value={selectedRaNames} onChange={v=>startFilterTransition(()=>setSelectedRaNames(v))} placeholder='All RA Names' width={180}/>}
+          {referralInitialTargetOptions.length>0&&<MultiSelectCombobox options={referralInitialTargetOptions} value={referralInitialTargetFilter} onChange={v=>startFilterTransition(()=>{setReferralInitialTargetFilter(v);setReferralExpanded(null);})} placeholder='All Initial Targets' width={220}/>}
         </div>
       </div>
     </div>
@@ -273,6 +278,7 @@ export default function App() {
           <TabsTrigger value='sites'>Site Maturity</TabsTrigger>
           <TabsTrigger value='staffing'>Staffing</TabsTrigger>
           <TabsTrigger value='referrals'>Referral Activity</TabsTrigger>
+          <TabsTrigger value='intake'>Central Intake</TabsTrigger>
           <TabsTrigger value='dataquality'>Data Quality</TabsTrigger>
         </TabsList>
         <TabsContent value='overview'>
@@ -563,7 +569,6 @@ export default function App() {
                   )}
                 </div>
                 <div style={{display:'flex',gap:10,alignItems:'center'}}>
-                  {referralInitialTargetOptions.length>0&&<MultiSelectCombobox options={referralInitialTargetOptions} value={referralInitialTargetFilter} onChange={v=>startFilterTransition(()=>{setReferralInitialTargetFilter(v);setReferralExpanded(null);})} placeholder='All Initial Targets' width={220}/>}
                   <input type='text' placeholder='Search...' value={referralSearchQuery} onChange={e=>setReferralSearchQuery(e.target.value)} style={{background:COLORS.background,border:'1px solid '+COLORS.border,borderRadius:6,padding:'7px 12px',color:COLORS.text,fontSize:13,width:200,outline:'none'}}/>
                   <span style={{fontSize:12,color:COLORS.dimmed,background:COLORS.border,padding:'2px 8px',borderRadius:10}}>{filteredReferralData.length} results</span>
                   {referralParser.metadata?.storageKey&&<button onClick={()=>{void exportToCSVStream(referralParser.metadata!.storageKey,'referral-data-'+new Date().toISOString().slice(0,10)+'.csv').catch((err: any)=>{if(err?.name==='AbortError') return; setParseErrors(p=>({...p,referrals:err?.message||'Failed to export referral data.'}));});}} style={{background:'linear-gradient(135deg,'+COLORS.accent+'22,'+COLORS.accent+'11)',border:'1px solid '+COLORS.accent+'44',borderRadius:6,padding:'7px 16px',color:COLORS.accent,fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>Export Referral Data</button>}
@@ -688,6 +693,11 @@ export default function App() {
               {filteredReferralData.length===0&&<div style={{textAlign:'center',padding:'32px 0',color:COLORS.dimmed}}>No results match your search.</div>}
             </div>
           </>:<div style={{textAlign:'center',padding:'40px 0',color:COLORS.dimmed}}>{referralsLoaded?'Load Listings, Sites, and Users files alongside Referral Analytics for full cross-referencing.':'Load the Referral Analytics export file to view referral activity.'}</div>}
+        </TabsContent>
+        <TabsContent value='intake'>
+          {referralParser.intakeAnalytics && referralParser.intakeAnalytics.totalProcessed > 0
+            ? <CentralIntakeTab intake={referralParser.intakeAnalytics} loadedAtLabel={referralParser.metadata?.fileName}/>
+            : <div style={{textAlign:'center',padding:'40px 0',color:COLORS.dimmed}}>{referralsLoaded?'Central Intake metrics require referralCreationDate. No qualifying rows found in the current filter.':'Load the Referral Analytics export file to view Central Intake analytics.'}</div>}
         </TabsContent>
         <TabsContent value='dataquality'>
           {dataQuality&&<>

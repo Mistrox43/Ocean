@@ -1,8 +1,58 @@
 import { formatDate, normalizeSiteNumber, percentage } from '@/utils';
-import type { ReferralAnalytics } from '@/types';
+import type {
+  IntakeAnalytics,
+  IntakeFieldPresence,
+  IntakeMonthBucket,
+  IntakeRecipientBucket,
+  IntakeSentTypeBucket,
+  ReferralAnalytics,
+} from '@/types';
+import {
+  computeFiscalYear,
+  computeISOWeek,
+  computeQuarter,
+  diffDays,
+  normalizePatientPref,
+  parseBool,
+  parseNumeric,
+} from './intakeAnalytics';
 
 type Row = Record<string, string>;
 type Ctx = { sites: Row[] | null; listings: Row[] | null; users: Row[] | null };
+
+interface IntakeRecipientWork {
+  count: number;
+  wait1Days: number[];
+  wait2Days: number[];
+}
+
+interface IntakeSentTypeWork {
+  count: number;
+  referrers: Set<string>;
+}
+
+interface IntakeMonthWork {
+  month: string;
+  fiscalYear: string;
+  quarter: string;
+  isoWeeks: Set<string>;
+  total: number;
+  patientIds: Set<string>;
+  wait1Days: number[];
+  wait2Days: number[];
+  cycleDays: number[];
+  completeCount: number;
+  incompleteCount: number;
+  patientPref: Record<string, number>;
+  byRecipient: Record<string, IntakeRecipientWork>;
+  byReferrer: Record<string, number>;
+  bySentType: Record<string, IntakeSentTypeWork>;
+}
+
+export interface AccumulatorOutput {
+  referral: ReferralAnalytics;
+  intake: IntakeAnalytics;
+}
 
 export class ReferralAnalyticsAccumulator {
   private siteNameLookup: Record<string, string> = {};
@@ -38,6 +88,31 @@ export class ReferralAnalyticsAccumulator {
   private emrSent: Record<string, number> = {};
   private emrRecv: Record<string, number> = {};
   private sourceTypeMap: Record<string, number> = {};
+
+  // Central Intake aggregation
+  private intakeMonths: Record<string, IntakeMonthWork> = {};
+  private intakeWeeks: Record<string, { count: number; month: string }> = {};
+  private intakeUniquePatients = new Set<string>();
+  private intakeProcessed = 0;
+  private intakeCompleteCount = 0;
+  private intakeIncompleteCount = 0;
+  private intakeCycleSum = 0;
+  private intakeCycleCount = 0;
+  private intakeWait1Count = 0;
+  private intakeWait2Count = 0;
+  private intakeMinDate = '';
+  private intakeMaxDate = '';
+  private presence: IntakeFieldPresence = {
+    patientId: false,
+    wait1: false,
+    wait2: false,
+    cycle: false,
+    preference: false,
+    complete: false,
+    referrer: false,
+    source: false,
+    recipient: false,
+  };
 
   constructor(ctx: Ctx) {
     if (ctx.sites) ctx.sites.forEach(s => { const k = normalizeSiteNumber(s.siteNumber); this.siteNameLookup[k] = s.siteName; this.siteEmrLookup[k] = s.emr || ''; });
@@ -114,9 +189,202 @@ export class ReferralAnalyticsAccumulator {
     const srcEmr = this.siteEmrLookup[srcSite] || 'Unknown EMR'; const tgtEmr = this.siteEmrLookup[tgtSite] || 'Unknown EMR';
     this.emrSent[srcEmr] = (this.emrSent[srcEmr] || 0) + 1; this.emrRecv[tgtEmr] = (this.emrRecv[tgtEmr] || 0) + 1;
     const srcType = row.referralSource || 'Unknown'; this.sourceTypeMap[srcType] = (this.sourceTypeMap[srcType] || 0) + 1;
+
+    this.accumulateIntake(row, fd);
   }
 
-  finalize(): ReferralAnalytics {
+  private accumulateIntake(row: Row, creationIso: string) {
+    if (parseBool(row.referralDeleted) === true) return;
+    if (!creationIso || !/^\d{4}-\d{2}-\d{2}$/.test(creationIso)) return;
+
+    if (row.patientId !== undefined && row.patientId !== '') this.presence.patientId = true;
+    if (row.wait1Days !== undefined && row.wait1Days !== '') this.presence.wait1 = true;
+    if (row.scheduledAppointment !== undefined && row.scheduledAppointment !== '') this.presence.wait1 = true;
+    if (row.wait2Days !== undefined && row.wait2Days !== '') this.presence.wait2 = true;
+    if (row.scheduledAppointment2 !== undefined && row.scheduledAppointment2 !== '') this.presence.wait2 = true;
+    if (row.daysUntilReferralResponse !== undefined && row.daysUntilReferralResponse !== '') this.presence.cycle = true;
+    if (row.acceptedDate !== undefined && row.acceptedDate !== '') this.presence.cycle = true;
+    if (row.patientPreference !== undefined && row.patientPreference !== '') this.presence.preference = true;
+    if (row.receivedReferralComplete !== undefined && row.receivedReferralComplete !== '') this.presence.complete = true;
+    if (row.referrerName !== undefined && row.referrerName !== '') this.presence.referrer = true;
+    if (row.referralSource !== undefined && row.referralSource !== '') this.presence.source = true;
+    if (row.recipientName !== undefined && row.recipientName !== '') this.presence.recipient = true;
+
+    this.intakeProcessed++;
+    if (!this.intakeMinDate || creationIso < this.intakeMinDate) this.intakeMinDate = creationIso;
+    if (!this.intakeMaxDate || creationIso > this.intakeMaxDate) this.intakeMaxDate = creationIso;
+
+    if (row.patientId) this.intakeUniquePatients.add(row.patientId);
+
+    const month = creationIso.slice(0, 7);
+    const fiscalYear = computeFiscalYear(creationIso);
+    const quarter = computeQuarter(creationIso);
+    const isoWeek = computeISOWeek(creationIso);
+
+    let bucket = this.intakeMonths[month];
+    if (!bucket) {
+      bucket = {
+        month,
+        fiscalYear,
+        quarter,
+        isoWeeks: new Set(),
+        total: 0,
+        patientIds: new Set(),
+        wait1Days: [],
+        wait2Days: [],
+        cycleDays: [],
+        completeCount: 0,
+        incompleteCount: 0,
+        patientPref: {},
+        byRecipient: {},
+        byReferrer: {},
+        bySentType: {},
+      };
+      this.intakeMonths[month] = bucket;
+    }
+    bucket.total++;
+    if (row.patientId) bucket.patientIds.add(row.patientId);
+    if (isoWeek) {
+      bucket.isoWeeks.add(isoWeek);
+      const wk = this.intakeWeeks[isoWeek];
+      if (!wk) this.intakeWeeks[isoWeek] = { count: 1, month };
+      else wk.count++;
+    }
+
+    let w1 = parseNumeric(row.wait1Days);
+    if (w1 === null) w1 = diffDays(row.scheduledAppointment, row.referralCreationDate);
+    if (w1 !== null && w1 >= 0) {
+      bucket.wait1Days.push(w1);
+      this.intakeWait1Count++;
+    }
+
+    let w2 = parseNumeric(row.wait2Days);
+    if (w2 === null) w2 = diffDays(row.scheduledAppointment2, row.referralCreationDate);
+    if (w2 !== null && w2 >= 0) {
+      bucket.wait2Days.push(w2);
+      this.intakeWait2Count++;
+    }
+
+    let cycle = parseNumeric(row.daysUntilReferralResponse);
+    if (cycle === null) cycle = diffDays(row.acceptedDate, row.referralCreationDate);
+    if (cycle !== null && cycle >= 0) {
+      bucket.cycleDays.push(cycle);
+      this.intakeCycleSum += cycle;
+      this.intakeCycleCount++;
+    }
+
+    const completeBool = parseBool(row.receivedReferralComplete);
+    if (completeBool === true) {
+      bucket.completeCount++;
+      this.intakeCompleteCount++;
+    } else if (completeBool === false) {
+      bucket.incompleteCount++;
+      this.intakeIncompleteCount++;
+    }
+
+    const pref = normalizePatientPref(row.patientPreference);
+    if (pref) bucket.patientPref[pref] = (bucket.patientPref[pref] || 0) + 1;
+
+    const recipient = row.recipientName ? String(row.recipientName).trim() : '';
+    const recipientKey = recipient || '(Unknown)';
+    let rec = bucket.byRecipient[recipientKey];
+    if (!rec) {
+      rec = { count: 0, wait1Days: [], wait2Days: [] };
+      bucket.byRecipient[recipientKey] = rec;
+    }
+    rec.count++;
+    if (w1 !== null && w1 >= 0) rec.wait1Days.push(w1);
+    if (w2 !== null && w2 >= 0) rec.wait2Days.push(w2);
+
+    const referrer = row.referrerName ? String(row.referrerName).trim().toUpperCase() : '(UNKNOWN)';
+    bucket.byReferrer[referrer] = (bucket.byReferrer[referrer] || 0) + 1;
+
+    const sentType = (row.referralSource && String(row.referralSource).trim()) || '(Unknown)';
+    let st = bucket.bySentType[sentType];
+    if (!st) {
+      st = { count: 0, referrers: new Set() };
+      bucket.bySentType[sentType] = st;
+    }
+    st.count++;
+    if (row.referrerName) st.referrers.add(String(row.referrerName).trim());
+  }
+
+  private finalizeIntake(): IntakeAnalytics {
+    const byMonth: Record<string, IntakeMonthBucket> = {};
+    const monthsByQuarter: Record<string, string[]> = {};
+    const quartersByFy: Record<string, string[]> = {};
+    const weeksByMonth: Record<string, string[]> = {};
+    const fySet = new Set<string>();
+
+    const recipientFinalize = (r: IntakeRecipientWork): IntakeRecipientBucket => ({
+      count: r.count,
+      wait1Days: r.wait1Days,
+      wait2Days: r.wait2Days,
+    });
+    const sentTypeFinalize = (s: IntakeSentTypeWork): IntakeSentTypeBucket => ({
+      count: s.count,
+      referrers: [...s.referrers],
+    });
+
+    const monthKeys = Object.keys(this.intakeMonths).sort();
+    for (const m of monthKeys) {
+      const w = this.intakeMonths[m];
+      const isoWeeks = [...w.isoWeeks].sort();
+      weeksByMonth[m] = isoWeeks;
+      const byRecipient: Record<string, IntakeRecipientBucket> = {};
+      for (const [k, v] of Object.entries(w.byRecipient)) byRecipient[k] = recipientFinalize(v);
+      const bySentType: Record<string, IntakeSentTypeBucket> = {};
+      for (const [k, v] of Object.entries(w.bySentType)) bySentType[k] = sentTypeFinalize(v);
+
+      byMonth[m] = {
+        month: w.month,
+        fiscalYear: w.fiscalYear,
+        quarter: w.quarter,
+        isoWeeks,
+        total: w.total,
+        patientIds: [...w.patientIds],
+        wait1Days: w.wait1Days,
+        wait2Days: w.wait2Days,
+        cycleDays: w.cycleDays,
+        completeCount: w.completeCount,
+        incompleteCount: w.incompleteCount,
+        patientPref: w.patientPref,
+        byRecipient,
+        byReferrer: w.byReferrer,
+        bySentType,
+      };
+      fySet.add(w.fiscalYear);
+      if (!monthsByQuarter[w.quarter]) monthsByQuarter[w.quarter] = [];
+      monthsByQuarter[w.quarter].push(m);
+      if (!quartersByFy[w.fiscalYear]) quartersByFy[w.fiscalYear] = [];
+      if (!quartersByFy[w.fiscalYear].includes(w.quarter)) quartersByFy[w.fiscalYear].push(w.quarter);
+    }
+
+    for (const fy of Object.keys(quartersByFy)) quartersByFy[fy].sort();
+    for (const q of Object.keys(monthsByQuarter)) monthsByQuarter[q].sort();
+
+    return {
+      earliestDate: this.intakeMinDate,
+      latestDate: this.intakeMaxDate,
+      fiscalYears: [...fySet].sort(),
+      quartersByFy,
+      monthsByQuarter,
+      weeksByMonth,
+      byMonth,
+      byWeek: { ...this.intakeWeeks },
+      totalProcessed: this.intakeProcessed,
+      uniquePatientCount: this.intakeUniquePatients.size,
+      completeCount: this.intakeCompleteCount,
+      incompleteCount: this.intakeIncompleteCount,
+      cycleSum: this.intakeCycleSum,
+      cycleCount: this.intakeCycleCount,
+      wait1Count: this.intakeWait1Count,
+      wait2Count: this.intakeWait2Count,
+      presence: { ...this.presence },
+    };
+  }
+
+  finalize(): AccumulatorOutput {
     const mOff = (m: string, off: number) => { const d = new Date(m + '-01'); d.setMonth(d.getMonth() + off); return d.toISOString().slice(0, 7); };
     const monthKeys = Object.keys(this.monthly).sort();
     const curM = monthKeys.length ? monthKeys[monthKeys.length - 1] : new Date().toISOString().slice(0, 7);
@@ -152,7 +420,7 @@ export class ReferralAnalyticsAccumulator {
       .map(([ref, title]) => ({ ref, title }))
       .sort((a, b) => a.ref.localeCompare(b.ref));
 
-    return {
+    const referral: ReferralAnalytics = {
       total: this.totalRows, distinctRefs: this.distinctRefs.size,
       uniqueSendingSites: this.uniqueSendingSites.size, uniqueTargetSites: this.uniqueTargetSites.size, uniqueSenders: this.uniqueSenders.size, uniqueProfIds: this.uniqueProfIds.size, uniqueTargetRefs: this.uniqueTargetRefs.size, distinctInitialTargetRefs,
       curMCount, curM, lastFullM, lastFullCount, chg1, cmp1M, cmp1Count, chg3, cmp3M, cmp3Count, chg12, cmp12M, cmp12Count, earliestDate: this.earliestDate,
@@ -160,5 +428,6 @@ export class ReferralAnalyticsAccumulator {
       timeline, weekly, byTarget, bySource, bySender,
       byRegion: topN(byRegionSorted), byRaName: topN(byRaNameSorted), byService: topN(bySvcSorted), byClinType: topN(byCtSorted), byEmrSent, byEmrRecv,
     };
+    return { referral, intake: this.finalizeIntake() };
   }
 }
