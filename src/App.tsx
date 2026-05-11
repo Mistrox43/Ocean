@@ -147,14 +147,17 @@ export default function App() {
       lastIngestSigRef.current = sig;
       return;
     }
-    referralParser.recomputeFromStore(
-      storageKey,
-      includeTest,
-      regionListingRefs ? [...regionListingRefs] : [],
-      referralInitialTargetFilter.length ? referralInitialTargetFilter : undefined,
-      selectedRaNames.length ? selectedRaNames : undefined,
-      { sites, listings, users },
-    );
+    const handle = setTimeout(() => {
+      referralParser.recomputeFromStore(
+        storageKey,
+        includeTest,
+        regionListingRefs ? [...regionListingRefs] : [],
+        referralInitialTargetFilter.length ? referralInitialTargetFilter : undefined,
+        selectedRaNames.length ? selectedRaNames : undefined,
+        { sites, listings, users },
+      );
+    }, 300);
+    return () => clearTimeout(handle);
   }, [referralParser.metadata?.storageKey, referralParser.metadata?.paritySignature, referralParser.recomputeFromStore, includeTest, regionListingRefs, referralInitialTargetFilter, selectedRaNames, sites, listings, users]);
   const referralAnalytics = useReferralAnalytics(null, null, sites, listings, users, referralParser.analytics);
   const referralIngestDiag = referralParser.metadata?.diagnostics;
