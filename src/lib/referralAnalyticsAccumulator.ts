@@ -3,6 +3,7 @@ import type {
   IntakeAnalytics,
   IntakeFieldPresence,
   IntakeMonthBucket,
+  IntakeOpenEntry,
   IntakeRecipientBucket,
   IntakeSentTypeBucket,
   ReferralAnalytics,
@@ -41,6 +42,7 @@ interface IntakeMonthWork {
   wait1Days: number[];
   wait2Days: number[];
   cycleDays: number[];
+  openEntries: IntakeOpenEntry[];
   completeCount: number;
   incompleteCount: number;
   patientPref: Record<string, number>;
@@ -107,6 +109,8 @@ export class ReferralAnalyticsAccumulator {
     wait1: false,
     wait2: false,
     cycle: false,
+    ciProcessing: false,
+    backlog: false,
     preference: false,
     complete: false,
     referrer: false,
@@ -202,8 +206,6 @@ export class ReferralAnalyticsAccumulator {
     if (row.scheduledAppointment !== undefined && row.scheduledAppointment !== '') this.presence.wait1 = true;
     if (row.wait2Days !== undefined && row.wait2Days !== '') this.presence.wait2 = true;
     if (row.scheduledAppointment2 !== undefined && row.scheduledAppointment2 !== '') this.presence.wait2 = true;
-    if (row.daysUntilReferralResponse !== undefined && row.daysUntilReferralResponse !== '') this.presence.cycle = true;
-    if (row.acceptedDate !== undefined && row.acceptedDate !== '') this.presence.cycle = true;
     if (row.patientPreference !== undefined && row.patientPreference !== '') this.presence.preference = true;
     if (row.receivedReferralComplete !== undefined && row.receivedReferralComplete !== '') this.presence.complete = true;
     if (row.referrerName !== undefined && row.referrerName !== '') this.presence.referrer = true;
@@ -233,6 +235,7 @@ export class ReferralAnalyticsAccumulator {
         wait1Days: [],
         wait2Days: [],
         cycleDays: [],
+        openEntries: [],
         completeCount: 0,
         incompleteCount: 0,
         patientPref: {},
@@ -265,12 +268,26 @@ export class ReferralAnalyticsAccumulator {
       this.intakeWait2Count++;
     }
 
-    let cycle = parseNumeric(row.daysUntilReferralResponse);
-    if (cycle === null) cycle = diffDays(row.acceptedDate, row.referralCreationDate);
-    if (cycle !== null && cycle >= 0) {
-      bucket.cycleDays.push(cycle);
-      this.intakeCycleSum += cycle;
-      this.intakeCycleCount++;
+    const initialIso = formatDate(row.referralInitialCreationDate);
+    const fwdIso = formatDate(row.initialForwardDate);
+    const hasCI = !!row.centralIntakeRef;
+
+    if (hasCI && initialIso && fwdIso) {
+      const cycle = diffDays(fwdIso, initialIso);
+      if (cycle !== null && cycle >= 0) {
+        bucket.cycleDays.push(cycle);
+        this.intakeCycleSum += cycle;
+        this.intakeCycleCount++;
+        this.presence.cycle = true;
+        this.presence.ciProcessing = true;
+      }
+    } else if (hasCI && initialIso && !fwdIso) {
+      bucket.openEntries.push({
+        creationIso,
+        initialCreationIso: initialIso,
+        referralState: row.referralState || 'UNKNOWN',
+      });
+      this.presence.backlog = true;
     }
 
     const completeBool = parseBool(row.receivedReferralComplete);
@@ -346,6 +363,7 @@ export class ReferralAnalyticsAccumulator {
         wait1Days: w.wait1Days,
         wait2Days: w.wait2Days,
         cycleDays: w.cycleDays,
+        openEntries: w.openEntries,
         completeCount: w.completeCount,
         incompleteCount: w.incompleteCount,
         patientPref: w.patientPref,

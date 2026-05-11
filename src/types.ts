@@ -286,6 +286,12 @@ export interface IntakeSentTypeBucket {
   referrers: string[];
 }
 
+export interface IntakeOpenEntry {
+  creationIso: string;
+  initialCreationIso: string;
+  referralState: string;
+}
+
 export interface IntakeMonthBucket {
   month: string;
   fiscalYear: string;
@@ -296,6 +302,7 @@ export interface IntakeMonthBucket {
   wait1Days: number[];
   wait2Days: number[];
   cycleDays: number[];
+  openEntries: IntakeOpenEntry[];
   completeCount: number;
   incompleteCount: number;
   patientPref: Record<string, number>;
@@ -314,6 +321,8 @@ export interface IntakeFieldPresence {
   wait1: boolean;
   wait2: boolean;
   cycle: boolean;
+  ciProcessing: boolean;
+  backlog: boolean;
   preference: boolean;
   complete: boolean;
   referrer: boolean;
@@ -363,10 +372,25 @@ export interface IntakeMethodRow {
   referrerCount: number;
 }
 
+export interface IntakeBacklogStateRow {
+  referralState: string;
+  count: number;
+  avgDays: number | null;
+}
+
 export interface IntakeView {
   totalProcessed: number;
   uniquePatients: number | null;
   avgCycleDays: number | null;
+  ciProcessingMedian: number | null;
+  ciProcessingP75: number | null;
+  ciProcessingP90: number | null;
+  ciProcessingCount: number;
+  backlogCount: number;
+  backlogAvgDays: number | null;
+  backlogHistogram: { label: string; value: number }[];
+  backlogByState: IntakeBacklogStateRow[];
+  backlogReferenceDate: string;
   wait1Count: number;
   wait2Count: number;
   avgWait1: number | null;

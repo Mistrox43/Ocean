@@ -80,6 +80,8 @@ export function CentralIntakeTab({ intake, loadedAtLabel }: CentralIntakeTabProp
 
   const presence = intake.presence;
   const cycleVisible = presence.cycle;
+  const ciProcessingVisible = presence.ciProcessing;
+  const backlogVisible = presence.backlog;
   const wait1Visible = presence.wait1;
   const wait2Visible = presence.wait2;
   const preferenceVisible = presence.preference && Object.keys(view.patientPref).length > 0;
@@ -200,6 +202,57 @@ export function CentralIntakeTab({ intake, loadedAtLabel }: CentralIntakeTabProp
           color={COLORS.blue}
         />
       </div>
+
+      {ciProcessingVisible && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 14, marginBottom: 14 }}>
+          <KPI
+            label="CI Processing Time — Median"
+            value={fmt1(view.ciProcessingMedian)}
+            sub={`${formatNumber(view.ciProcessingCount)} closed`}
+            color={COLORS.purple}
+          />
+          <KPI
+            label="CI Processing Time — P75"
+            value={fmt1(view.ciProcessingP75)}
+            color={COLORS.amber}
+          />
+          <KPI
+            label="CI Processing Time — P90"
+            value={fmt1(view.ciProcessingP90)}
+            color={COLORS.red}
+          />
+        </div>
+      )}
+
+      {backlogVisible && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr 2fr', gap: 16, marginBottom: 14 }}>
+          <ChartBox title="Days at CI (Backlog)" subtitle={`as of ${view.backlogReferenceDate || '—'}`}>
+            <div style={{ fontSize: 28, fontWeight: 800, color: COLORS.red }}>
+              {formatNumber(view.backlogCount)}
+            </div>
+            <div style={{ fontSize: 12, color: COLORS.muted, marginTop: 2 }}>
+              open referrals · avg {fmt1(view.backlogAvgDays)} days
+            </div>
+          </ChartBox>
+          <ChartBox title="Backlog Age Distribution">
+            {view.backlogHistogram.length > 0 ? (
+              <Bar data={view.backlogHistogram} color={COLORS.red} height={180} />
+            ) : (
+              <EmptyState text="No open referrals at CI in selected window." />
+            )}
+          </ChartBox>
+          <ChartBox title="Backlog by Referral State">
+            <SimpleTable
+              columns={[
+                { key: 'referralState', label: 'Referral State' },
+                { key: 'count', label: '# Open', numeric: true, format: (v) => formatNumber(v as number) },
+                { key: 'avgDays', label: 'Avg Days', numeric: true, format: (v) => fmt1(v as number | null) },
+              ]}
+              rows={view.backlogByState}
+            />
+          </ChartBox>
+        </div>
+      )}
 
       {/* Chart row — donuts get 2 cols each, gauges 1 col each, on a 6-col grid */}
       <div
