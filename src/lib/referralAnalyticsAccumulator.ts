@@ -385,8 +385,17 @@ export class ReferralAnalyticsAccumulator {
   }
 
   finalize(): AccumulatorOutput {
-    const now = new Date(); const curM = now.toISOString().slice(0, 7);
-    const mOff = (m: string, off: number) => { const d = new Date(m + '-01'); d.setMonth(d.getMonth() + off); return d.toISOString().slice(0, 7); };
+    const now = new Date();
+    const curM = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    // Pure integer year/month math — avoids the UTC-parse + local-arithmetic
+    // mix that previously shifted labels by a month in negative timezones.
+    const mOff = (m: string, off: number) => {
+      const y = parseInt(m.slice(0, 4), 10);
+      const mIdx = parseInt(m.slice(5, 7), 10) - 1 + off;
+      const ty = y + Math.floor(mIdx / 12);
+      const tm = ((mIdx % 12) + 12) % 12;
+      return `${ty}-${String(tm + 1).padStart(2, '0')}`;
+    };
     const lastFullM = mOff(curM, -1); const cmp1M = mOff(curM, -2); const cmp3M = mOff(curM, -4); const cmp12M = mOff(curM, -13);
     let cum = 0;
     const timeline = Object.keys(this.monthly).sort().map(m => { cum += this.monthly[m]; return { label: m, value: this.monthly[m], cumulative: cum }; });
