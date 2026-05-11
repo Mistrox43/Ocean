@@ -18,12 +18,13 @@ export function computeReferralAnalytics(
   const userNameLookup: Record<string, { name: string; clinicianType: string }> = {};
   if (users) users.forEach(u => { if (u.userName) userNameLookup[u.userName] = { name: u.name || '', clinicianType: u.clinicianType || '' }; });
 
-  const now = new Date(); const curM = now.toISOString().slice(0, 7);
   const mOff = (m: string, off: number) => { const d = new Date(m + '-01'); d.setMonth(d.getMonth() + off); return d.toISOString().slice(0, 7); };
-  const lastFullM = mOff(curM, -1); const cmp1M = mOff(curM, -2); const cmp3M = mOff(curM, -4); const cmp12M = mOff(curM, -13);
 
   const mm: Record<string, number> = {};
   filteredReferralRows.forEach(r => { const fd = formatDate(r.referralCreationDate); if (fd && fd.length >= 7) { const m = fd.substring(0, 7); mm[m] = (mm[m] || 0) + 1; } });
+  const monthKeys = Object.keys(mm).sort();
+  const curM = monthKeys.length ? monthKeys[monthKeys.length - 1] : new Date().toISOString().slice(0, 7);
+  const lastFullM = mOff(curM, -1); const cmp1M = mOff(lastFullM, -1); const cmp3M = mOff(lastFullM, -3); const cmp12M = mOff(lastFullM, -12);
   let cum = 0;
   const timeline = Object.keys(mm).sort().map(m => { cum += mm[m]; return { label: m, value: mm[m], cumulative: cum }; });
   const curMCount = mm[curM] || 0; const lastFullCount = mm[lastFullM] || 0;
