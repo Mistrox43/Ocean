@@ -385,10 +385,17 @@ export class ReferralAnalyticsAccumulator {
   }
 
   finalize(): AccumulatorOutput {
-    const mOff = (m: string, off: number) => { const d = new Date(m + '-01'); d.setMonth(d.getMonth() + off); return d.toISOString().slice(0, 7); };
-    const monthKeys = Object.keys(this.monthly).sort();
-    const curM = monthKeys.length ? monthKeys[monthKeys.length - 1] : new Date().toISOString().slice(0, 7);
-    const lastFullM = mOff(curM, -1); const cmp1M = mOff(lastFullM, -1); const cmp3M = mOff(lastFullM, -3); const cmp12M = mOff(lastFullM, -12);
+const mOff = (m: string, off: number) => {
+  const y = parseInt(m.slice(0, 4), 10);
+  const mIdx = parseInt(m.slice(5, 7), 10) - 1 + off;
+  const ty = y + Math.floor(mIdx / 12);
+  const tm = ((mIdx % 12) + 12) % 12;
+  return `${ty}-${String(tm + 1).padStart(2, '0')}`;
+};
+const monthKeys = Object.keys(this.monthly).sort();
+const now = new Date();
+const curM = monthKeys.length ? monthKeys[monthKeys.length - 1] : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+const lastFullM = mOff(curM, -1); const cmp1M = mOff(lastFullM, -1); const cmp3M = mOff(lastFullM, -3); const cmp12M = mOff(lastFullM, -12);
     let cum = 0;
     const timeline = Object.keys(this.monthly).sort().map(m => { cum += this.monthly[m]; return { label: m, value: this.monthly[m], cumulative: cum }; });
     const curMCount = this.monthly[curM] || 0; const lastFullCount = this.monthly[lastFullM] || 0;
