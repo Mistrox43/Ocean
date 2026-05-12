@@ -133,6 +133,13 @@ export const REFERRAL_MAP: Record<string, string> = {
   receivedreferralcomplete: 'receivedReferralComplete',
   receivedReferralComplete: 'receivedReferralComplete',
   'received referral complete': 'receivedReferralComplete',
+  centralintakeref: 'centralIntakeRef', centralIntakeRef: 'centralIntakeRef',
+  'central intake ref': 'centralIntakeRef', 'Central Intake Ref': 'centralIntakeRef',
+  referralinitialcreationdate: 'referralInitialCreationDate',
+  referralInitialCreationDate: 'referralInitialCreationDate',
+  'referral initial creation date': 'referralInitialCreationDate',
+  initialforwarddate: 'initialForwardDate', initialForwardDate: 'initialForwardDate',
+  'initial forward date': 'initialForwardDate',
 };
 
 // ── Diagnostic field sets ───────────────────────────────────────────────────
@@ -173,6 +180,7 @@ export const USED_FIELDS: Record<string, Set<string>> = {
     'patientId', 'scheduledAppointment', 'scheduledAppointment2',
     'wait1Days', 'wait2Days', 'daysUntilReferralResponse',
     'referralDeleted', 'patientPreference', 'receivedReferralComplete',
+    'centralIntakeRef', 'referralInitialCreationDate', 'initialForwardDate',
   ]),
 };
 

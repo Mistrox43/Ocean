@@ -1,5 +1,6 @@
 import type {
   IntakeAnalytics,
+  IntakeBacklogStateRow,
   IntakeMonthBucket,
   IntakeRecipientStat,
   IntakeView,
@@ -147,6 +148,8 @@ export function mergeMonthBuckets(intake: IntakeAnalytics, filter: MergeFilter):
   let incompleteCount = 0;
   let cycleSum = 0;
   let cycleCount = 0;
+  const cycleAll: number[] = [];
+  const openAll: { initialCreationIso: string; referralState: string }[] = [];
   const wait1All: number[] = [];
   const wait2All: number[] = [];
   const patientPref: Record<string, number> = {};
@@ -165,6 +168,10 @@ export function mergeMonthBuckets(intake: IntakeAnalytics, filter: MergeFilter):
     for (const c of b.cycleDays) {
       cycleSum += c;
       cycleCount++;
+      cycleAll.push(c);
+    }
+    for (const e of b.openEntries) {
+      openAll.push({ initialCreationIso: e.initialCreationIso, referralState: e.referralState });
     }
     for (const w of b.wait1Days) wait1All.push(w);
     for (const w of b.wait2Days) wait2All.push(w);
@@ -218,10 +225,53 @@ export function mergeMonthBuckets(intake: IntakeAnalytics, filter: MergeFilter):
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
+  const referenceIso = intake.latestDate;
+  const allOpenDays = referenceIso
+    ? openAll
+        .map(e => diffDays(referenceIso, e.initialCreationIso))
+        .filter((d): d is number => d !== null && d >= 0)
+    : [];
+
+  const bucketDefs = [
+    { label: '0–3', test: (d: number) => d <= 3 },
+    { label: '4–7', test: (d: number) => d > 3 && d <= 7 },
+    { label: '8–14', test: (d: number) => d > 7 && d <= 14 },
+    { label: '15–30', test: (d: number) => d > 14 && d <= 30 },
+    { label: '30+', test: (d: number) => d > 30 },
+  ];
+  const backlogHistogram = bucketDefs.map(bd => ({
+    label: bd.label,
+    value: allOpenDays.filter(bd.test).length,
+  }));
+
+  const stateAgg = new Map<string, number[]>();
+  for (const e of openAll) {
+    const d = referenceIso ? diffDays(referenceIso, e.initialCreationIso) : null;
+    if (d === null || d < 0) continue;
+    const k = e.referralState || 'UNKNOWN';
+    if (!stateAgg.has(k)) stateAgg.set(k, []);
+    stateAgg.get(k)!.push(d);
+  }
+  const backlogByState: IntakeBacklogStateRow[] = [...stateAgg.entries()]
+    .map(([referralState, arr]) => ({ referralState, count: arr.length, avgDays: mean(arr) }))
+    .sort((a, b) => b.count - a.count);
+
+  const backlogPresent = intake.presence.backlog;
+  const ciPresent = intake.presence.ciProcessing;
+
   return {
     totalProcessed,
     uniquePatients: intake.presence.patientId ? patientIds.size : null,
     avgCycleDays: intake.presence.cycle && cycleCount > 0 ? cycleSum / cycleCount : null,
+    ciProcessingMedian: ciPresent ? percentile(cycleAll, 50) : null,
+    ciProcessingP75: ciPresent ? percentile(cycleAll, 75) : null,
+    ciProcessingP90: ciPresent ? percentile(cycleAll, 90) : null,
+    ciProcessingCount: cycleAll.length,
+    backlogCount: backlogPresent ? allOpenDays.length : 0,
+    backlogAvgDays: backlogPresent ? mean(allOpenDays) : null,
+    backlogHistogram: backlogPresent ? backlogHistogram : [],
+    backlogByState: backlogPresent ? backlogByState : [],
+    backlogReferenceDate: backlogPresent ? referenceIso || '' : '',
     wait1Count: wait1All.length,
     wait2Count: wait2All.length,
     avgWait1: mean(wait1All),
