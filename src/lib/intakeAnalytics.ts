@@ -45,6 +45,23 @@ export function diffDays(laterIso: string, earlierIso: string): number | null {
   return (a.getTime() - b.getTime()) / 86400000;
 }
 
+// Like formatDate but preserves the time-of-day component for ISO timestamps
+// (e.g. "2026-04-21T14:52:00-04:00"). Used by CI cycle measures where intra-day
+// precision matters — the standard formatDate truncates to YYYY-MM-DD, which
+// collapses every same-day forward to exactly 0 days.
+export function parseTimestamp(v: string | undefined | null): string {
+  if (!v) return '';
+  const s = String(v).trim();
+  if (!s) return '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s;
+  const n = parseFloat(s);
+  if (!isNaN(n) && n > 1 && n < 200000) {
+    const d = new Date(Math.round((n - 25569) * 86400 * 1000));
+    if (!isNaN(d.getTime())) return d.toISOString();
+  }
+  return '';
+}
+
 export function parseNumeric(v: string | undefined | null): number | null {
   if (v === null || v === undefined) return null;
   const t = String(v).trim();

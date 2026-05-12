@@ -16,6 +16,7 @@ import {
   normalizePatientPref,
   parseBool,
   parseNumeric,
+  parseTimestamp,
 } from './intakeAnalytics';
 
 type Row = Record<string, string>;
@@ -268,12 +269,12 @@ export class ReferralAnalyticsAccumulator {
       this.intakeWait2Count++;
     }
 
-    const initialIso = formatDate(row.referralInitialCreationDate);
-    const fwdIso = formatDate(row.initialForwardDate);
+    const initialTs = parseTimestamp(row.referralInitialCreationDate);
+    const fwdTs = parseTimestamp(row.initialForwardDate);
     const hasCI = !!row.centralIntakeRef;
 
-    if (hasCI && initialIso && fwdIso) {
-      const cycle = diffDays(fwdIso, initialIso);
+    if (hasCI && initialTs && fwdTs) {
+      const cycle = diffDays(fwdTs, initialTs);
       if (cycle !== null && cycle >= 0) {
         bucket.cycleDays.push(cycle);
         this.intakeCycleSum += cycle;
@@ -281,10 +282,10 @@ export class ReferralAnalyticsAccumulator {
         this.presence.cycle = true;
         this.presence.ciProcessing = true;
       }
-    } else if (hasCI && initialIso && !fwdIso) {
+    } else if (hasCI && initialTs && !fwdTs) {
       bucket.openEntries.push({
         creationIso,
-        initialCreationIso: initialIso,
+        initialCreationIso: initialTs.slice(0, 10),
         referralState: row.referralState || 'UNKNOWN',
       });
       this.presence.backlog = true;
