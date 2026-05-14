@@ -22,6 +22,7 @@ interface CentralIntakeTabProps {
 const fmt1 = (v: number | null) => (v === null ? '—' : v.toFixed(1));
 const fmt2 = (v: number | null) => (v === null ? '—' : v.toFixed(2));
 const fmtPct = (v: number) => (v * 100).toFixed(1) + '%';
+const fmtHrs = (days: number | null) => (days === null ? '—' : (days * 24).toFixed(1));
 
 export function CentralIntakeTab({ intake, loadedAtLabel }: CentralIntakeTabProps) {
   const [fy, setFy] = useState<string>('');
@@ -208,17 +209,19 @@ export function CentralIntakeTab({ intake, loadedAtLabel }: CentralIntakeTabProp
           <KPI
             label="CI Processing Time — Median"
             value={fmt1(view.ciProcessingMedian)}
-            sub={`${formatNumber(view.ciProcessingCount)} closed`}
+            sub={`≈ ${fmtHrs(view.ciProcessingMedian)} hrs · ${formatNumber(view.ciProcessingCount)} closed`}
             color={COLORS.purple}
           />
           <KPI
             label="CI Processing Time — P75"
             value={fmt1(view.ciProcessingP75)}
+            sub={`≈ ${fmtHrs(view.ciProcessingP75)} hrs`}
             color={COLORS.amber}
           />
           <KPI
             label="CI Processing Time — P90"
             value={fmt1(view.ciProcessingP90)}
+            sub={`≈ ${fmtHrs(view.ciProcessingP90)} hrs`}
             color={COLORS.red}
           />
         </div>
