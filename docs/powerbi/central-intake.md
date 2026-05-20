@@ -11,7 +11,9 @@
 2. [Raw data source](#2-raw-data-source)
 3. [Normalization rules (Power Query M)](#3-normalization-rules-power-query-m)
 4. [Derived columns](#4-derived-columns)
-5. [Filter cascade](#5-filter-cascade)
+5. [Filters](#5-filters)
+   - [5.1 Global filter — Initial Referral Target](#51-global-filter--initial-referral-target)
+   - [5.2 Tab-level cascade (FY ▸ Q ▸ M ▸ W)](#52-tab-level-cascade-fy--q--m--w)
 6. [KPI cards](#6-kpi-cards)
 7. [Backlog section](#7-backlog-section)
 8. [Donut & gauge charts](#8-donut--gauge-charts)
@@ -328,14 +330,51 @@ RETURN SWITCH( TRUE(),
 
 ---
 
-## 5. Filter cascade
+## 5. Filters
 
-The Central Intake tab has a single filter bar at the top: **Fiscal Year ▸ Quarter ▸ Month ▸ Week**.
+Two filtering layers apply to every Central Intake visual. **Both must be implemented** for the PowerBI dashboard to match the application.
+
+### 5.1 Global filter — Initial Referral Target
+
+A multi-select control elsewhere on the page (outside the Central Intake tab) lets the user restrict the entire dataset to specific **initial referral targets**. The control is labelled with placeholder text `All Initial Targets` and is bound to the raw column `initialReferralTargetRef`.
+
+| | |
+| --- | --- |
+| **Raw column filtered** | `initialReferralTargetRef` |
+| **Control** | Multi-select combobox (`App.tsx:228`) |
+| **Options** | Distinct values of `initialReferralTargetRef` present in the loaded data; each labelled with the looked-up listing title from the Listings export when available, otherwise the raw ref. Options sorted alphabetically by ref. (`referralAnalytics.ts:132-134`, `referralAnalyticsAccumulator.ts:138-139, 445`) |
+| **Default** | No selection ⇒ all rows pass |
+| **Application point** | Applied during row streaming, **before** any aggregation, in the worker: `if (initialTargetSet && !initialTargetSet.has(row.initialReferralTargetRef)) continue;` (`file-parser.worker.ts:344`) |
+| **Scope** | **Applies to every tab in the application, including Central Intake.** Every KPI, chart, gauge, and table on the Central Intake tab must reflect this filter. |
+
+**Why this matters for PowerBI:** because the filter runs at the raw-row level — earlier than every measure documented in this file — the PowerBI implementation must be at least as broad. The recommended approach is a **report-level slicer** on `initialReferralTargetRef`, so that selecting one or more initial targets restricts the Central Intake page along with every other report page.
+
+```dax
+// Raw column on the Referrals fact table
+InitialReferralTargetRef = Referrals[initialReferralTargetRef]
+```
+
+```m
+// Optional: surface a friendly label combining ref + listing title
+InitialTargetLabel = (ref as text) as text =>
+    let title = try ListingsLookup{[ref = ref]}[title] otherwise ref in
+        if title = ref then ref else ref & " — " & title
+```
+
+Add a slicer on `initialReferralTargetRef` (or the friendly label) and set it to **Sync slicers** across all report pages so selecting a value on any page propagates to the Central Intake page automatically.
+
+**Interaction with the tab-level cascade (§5.2):** the two filters compose with logical AND. A row contributes to a Central Intake visual only if it passes the global Initial Referral Target filter **and** falls into the selected FY/Q/M/W window.
+
+> **Other global filters (informational, out of primary scope):** the application also has a Test Mode toggle (excludes rows where `sentToTestListing=TRUE`), a Region filter (filters on `referralTargetRef`), and an RA Name filter (filters on `raName`). They follow the same "applied at the raw-row level, affects every tab" pattern. If the PowerBI rebuild needs these too, mirror them as report-level slicers using the corresponding raw columns. Source: `file-parser.worker.ts:294-349`.
+
+### 5.2 Tab-level cascade (FY ▸ Q ▸ M ▸ W)
+
+The Central Intake tab itself has a single filter bar at the top: **Fiscal Year ▸ Quarter ▸ Month ▸ Week**.
 
 Behavior:
 
 - Selecting a higher level **clears** any selections below it.
-- With nothing selected, the view shows **all-time** data.
+- With nothing selected, the view shows **all-time** data (subject to §5.1).
 - Week options are populated only when a Month is selected.
 
 Cascade resolution: `intakeAnalytics.ts:130-145`. The selected level determines which month-buckets contribute to the aggregation:
@@ -348,9 +387,9 @@ Cascade resolution: `intakeAnalytics.ts:130-145`. The selected level determines 
 | FY set (no Quarter) | All months in that fiscal year |
 | Nothing set | All months in the dataset |
 
-**PowerBI implementation:** four slicers in cascade. The natural hierarchy is `fiscalYear → quarter → month → isoWeek`. Build a date dimension keyed on `month` to drive slicer selection, then propagate filters via a one-to-many relationship to `Referrals`.
+**PowerBI implementation:** four slicers in cascade. The natural hierarchy is `fiscalYear → quarter → month → isoWeek`. Build a date dimension keyed on `month` to drive slicer selection, then propagate filters via a one-to-many relationship to `Referrals`. These slicers should be **page-level** to the Central Intake page (the global Initial Referral Target slicer in §5.1 should be report-level).
 
-> **Note on backlog:** the backlog reference date is **always** the latest `referralCreationDate` in the **entire dataset**, regardless of the active filter. The filter cascade controls which open referrals are *counted*, not which date is used as "as of." Source: `intakeAnalytics.ts:245`.
+> **Note on backlog:** the backlog reference date is **always** the latest `referralCreationDate` in the **entire dataset** (after the global filter from §5.1 has been applied), regardless of the active cascade. The cascade controls which open referrals are *counted*, not which date is used as "as of." Source: `intakeAnalytics.ts:245`.
 
 ---
 
@@ -869,7 +908,12 @@ After building the model:
 - Set Week = `2025-06-09` → still included.
 - Set Month = `Jul 2025` → row should be **excluded**.
 
-If at any step the result deviates, walk back through §3 and §4 to find the mismatch.
+Also confirm the global Initial Referral Target filter (§5.1) composes correctly:
+
+- Add the row's `initialReferralTargetRef` value to the Initial Referral Target slicer (along with no FY filter) → row is included.
+- Select a *different* `initialReferralTargetRef` in the slicer → row should be **excluded** from every Central Intake visual, regardless of the FY/Q/M/W cascade.
+
+If at any step the result deviates, walk back through §3 and §4 (or §5 for slicer behavior) to find the mismatch.
 
 ---
 
@@ -879,7 +923,9 @@ Quick lookup table — for every visual, find the exact lines of code that produ
 
 | Visual / metric | Code location |
 | --- | --- |
-| Filter bar (FY/Q/M/W) | `CentralIntakeTab.tsx:125-176` |
+| Global filter: Initial Referral Target (UI) | `App.tsx:50-51, 80-81, 228`; options built in `referralAnalytics.ts:132-134` / `referralAnalyticsAccumulator.ts:138-139, 445` |
+| Global filter: Initial Referral Target (applied) | `file-parser.worker.ts:294-349` (specifically line 344) |
+| Tab-level cascade (FY/Q/M/W) UI | `CentralIntakeTab.tsx:125-176` |
 | KPI: # Referrals Processed | `CentralIntakeTab.tsx:180`; `intakeAnalytics.ts:181, 280` |
 | KPI: # Unique Patients | `CentralIntakeTab.tsx:181-186`; `intakeAnalytics.ts:182, 281` |
 | KPI: Avg Processing Cycle | `CentralIntakeTab.tsx:187-192`; `intakeAnalytics.ts:282` |
