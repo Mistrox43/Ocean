@@ -126,7 +126,7 @@ export function computeReferralAnalytics(
   const srcTypeMap: Record<string, number> = {}; filteredReferralRows.forEach(r => { const s = r.referralSource || 'Unknown'; srcTypeMap[s] = (srcTypeMap[s] || 0) + 1; });
   const fhirCount = Object.entries(srcTypeMap).filter(([k]) => k.toUpperCase().includes('FHIR')).reduce((s, e) => s + e[1], 0);
 
-  const uniqueProfIds = new Set(filteredReferralRows.map(r => r.referrerProfessionalId).filter(Boolean)).size;
+  const uniqueProfIds = new Set(filteredReferralRows.map(r => r.referrerProfessionalId).filter(Boolean).map(v => v.toLowerCase())).size;
   const uniqueTargetRefs = new Set(filteredReferralRows.map(r => r.referralTargetRef).filter(Boolean)).size;
   const distinctRefs = new Set(filteredReferralRows.map(r => r.referralRef).filter(Boolean)).size;
   const initialTargetRefMap = new Map<string, string>();
@@ -137,7 +137,7 @@ export function computeReferralAnalytics(
     total: filteredReferralRows.length, distinctRefs,
     uniqueSendingSites: new Set(filteredReferralRows.map(r => normalizeSiteNumber(r.srcsiteNum)).filter(Boolean)).size,
     uniqueTargetSites: new Set(filteredReferralRows.map(r => normalizeSiteNumber(r.siteNum)).filter(Boolean)).size,
-    uniqueSenders: new Set(filteredReferralRows.map(r => r.referredByUserName).filter(Boolean)).size,
+    uniqueSenders: new Set(filteredReferralRows.map(r => r.referredByUserName).filter(Boolean).map(v => v.toLowerCase())).size,
     uniqueProfIds, uniqueTargetRefs, distinctInitialTargetRefs,
     curMCount, curM, lastFullM, lastFullCount,
     chg1, cmp1M, cmp1Count, chg3, cmp3M, cmp3Count, chg12, cmp12M, cmp12Count, earliestDate,
