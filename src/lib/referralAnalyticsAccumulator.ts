@@ -132,8 +132,8 @@ export class ReferralAnalyticsAccumulator {
     const tgtSite = normalizeSiteNumber(row.siteNum);
     if (srcSite) this.uniqueSendingSites.add(srcSite);
     if (tgtSite) this.uniqueTargetSites.add(tgtSite);
-    if (row.referredByUserName) this.uniqueSenders.add(row.referredByUserName);
-    if (row.referrerProfessionalId) this.uniqueProfIds.add(row.referrerProfessionalId);
+    if (row.referredByUserName) this.uniqueSenders.add(row.referredByUserName.toLowerCase());
+    if (row.referrerProfessionalId) this.uniqueProfIds.add(row.referrerProfessionalId.toLowerCase());
     if (row.referralTargetRef) this.uniqueTargetRefs.add(row.referralTargetRef);
     const iRef = row.initialReferralTargetRef || '';
     if (iRef && !this.initialTargetRefs.has(iRef)) this.initialTargetRefs.set(iRef, this.listingTitleLookup[iRef] || iRef);
